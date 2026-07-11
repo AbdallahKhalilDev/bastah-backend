@@ -11,7 +11,8 @@
       "Bash(nohup node server.js)",
       "Bash(echo \"started PID=$!\")",
       "Bash(git rm *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(node -e \"require\\('dotenv'\\).config\\(\\); require\\('./app'\\); console.log\\('OK: app + auth routes load cleanly'\\);\")"
     ]
   }
 }
