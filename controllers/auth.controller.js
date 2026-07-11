@@ -1,4 +1,5 @@
 const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 const { z } = require("zod");
 const User = require("../models/User");
 
@@ -11,6 +12,14 @@ const registerSchema = z.object({
   email: z.string().email("A valid email is required"),
   password: z.string().min(6, "Password must be at least 6 characters"),
   phone: z.string().min(1, "Phone is required"),
+});
+
+// For login we only need email + password. We keep the rules light on purpose:
+// login should not tell the user "password too short" — it just checks the
+// credentials and gives one generic answer either way (see below).
+const loginSchema = z.object({
+  email: z.string().email("A valid email is required"),
+  password: z.string().min(1, "Password is required"),
 });
 
 // Take a User document and return only the safe, public fields.
@@ -54,4 +63,42 @@ async function register(req, res, next) {
   res.status(201).json({ user: publicUser(user) });
 }
 
-module.exports = { register, publicUser };
+// POST /api/auth/login
+async function login(req, res, next) {
+  // 1. Validate shape (must have an email and a non-empty password).
+  const result = loginSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const { email, password } = result.data;
+
+  // 2. Look up the user. IMPORTANT: whether the email is unknown OR the
+  //    password is wrong, we answer with the SAME generic 401. Revealing
+  //    "no such email" vs "wrong password" would let an attacker discover
+  //    which emails have accounts.
+  const user = await User.findOne({ email: email.toLowerCase() });
+  if (!user) {
+    return next({ status: 401, message: "Invalid email or password" });
+  }
+
+  // 3. bcrypt.compare re-hashes the given password and checks it against the
+  //    stored hash. It returns true only if they match.
+  const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+  if (!passwordMatches) {
+    return next({ status: 401, message: "Invalid email or password" });
+  }
+
+  // 4. Success: sign a JWT. The "payload" ({ id, role }) is data baked into
+  //    the token; JWT_SECRET signs it so nobody can forge or tamper with it.
+  //    The client sends this token back on future requests to prove identity.
+  const token = jwt.sign(
+    { id: user._id, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN }
+  );
+
+  res.json({ token });
+}
+
+module.exports = { register, login, publicUser };
