@@ -1,6 +1,7 @@
 const express = require("express");
 const asyncHandler = require("../utils/asyncHandler");
-const { register, login } = require("../controllers/auth.controller");
+const auth = require("../middleware/auth");
+const { register, login, me } = require("../controllers/auth.controller");
 
 const router = express.Router();
 
@@ -9,5 +10,9 @@ const router = express.Router();
 // central errorHandler.
 router.post("/register", asyncHandler(register));
 router.post("/login", asyncHandler(login));
+
+// Protected route: `auth` runs FIRST. Only a request with a valid token gets
+// past it (otherwise 401), and it sets req.user for the `me` controller to use.
+router.get("/me", auth, asyncHandler(me));
 
 module.exports = router;

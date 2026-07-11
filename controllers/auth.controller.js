@@ -101,4 +101,18 @@ async function login(req, res, next) {
   res.json({ token });
 }
 
-module.exports = { register, login, publicUser };
+// GET /api/auth/me  (protected by the `auth` middleware)
+async function me(req, res, next) {
+  // `auth` already verified the token and set req.user = { id, role }.
+  // We reload from the DB so the response reflects the user's CURRENT data
+  // (e.g. if their name/phone changed since the token was issued).
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return next({ status: 404, message: "User not found" });
+  }
+
+  // Same safe shape as register — never expose passwordHash.
+  res.json({ user: publicUser(user) });
+}
+
+module.exports = { register, login, me, publicUser };
