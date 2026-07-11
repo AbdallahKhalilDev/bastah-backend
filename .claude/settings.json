@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where winget *)",
+      "Bash(where choco *)",
+      "Bash(winget search *)",
+      "Bash(winget list *)",
+      "Bash(ps -W)",
+      "PowerShell(Get-Service -Name MongoDB -ErrorAction SilentlyContinue)",
+      "Bash(rm -f /tmp/server_out2.log)",
+      "Bash(nohup node server.js)",
+      "Bash(echo \"started PID=$!\")",
+      "Bash(git rm *)",
+      "Bash(git add *)"
+    ]
+  }
+}
