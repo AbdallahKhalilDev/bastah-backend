@@ -51,3 +51,6 @@ add-to-cart, wishlist, and reviews/ratings.
 
 The full data model, all endpoints grouped by page, and the ordered build plan
 are in **`docs/ROADMAP.md`**. Read it before starting a work session.
+
+**Progress:** Step 1 (scaffold + `/api/health` + Mongo connection) done and
+committed. Next: Step 2 — Auth + roles.
