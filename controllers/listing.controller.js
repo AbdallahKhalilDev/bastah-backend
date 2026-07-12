@@ -15,6 +15,15 @@ const createListingSchema = z.object({
   inStock: z.boolean().optional(),
 });
 
+// A WHITELIST for updating a listing. Notice what's NOT here: shop and product.
+// You may change ONLY the price and whether it's in stock. Both are optional so
+// a PATCH changes just the fields you send. (Why shop/product are forbidden is
+// explained on updateListing below.)
+const updateListingSchema = z.object({
+  price: z.number().min(0, "Price cannot be negative").optional(),
+  inStock: z.boolean().optional(),
+});
+
 // POST /api/shops/:shopId/listings
 // Protected: a logged-in seller or admin (auth + requireRole run first, in the
 // route). A seller may add a listing only to their OWN shop; an admin may add to
@@ -92,4 +101,84 @@ async function createListing(req, res, next) {
   }
 }
 
-module.exports = { createListing };
+// PATCH /api/listings/:id
+// Protected: a logged-in seller or admin (auth + requireRole run first). The
+// seller who owns the listing's shop may edit it; an admin may edit any. You can
+// change ONLY price and inStock.
+async function updateListing(req, res, next) {
+  // 1. Guard the id from the URL (else findById throws a CastError on junk).
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid listing id" });
+  }
+
+  // 2. Load the listing. A well-formed id matching nothing is a 404.
+  const listing = await Listing.findById(req.params.id);
+  if (!listing) {
+    return next({ status: 404, message: "Listing not found" });
+  }
+
+  // 3. Ownership. A listing doesn't store its owner directly — it points at a
+  //    shop, and the SHOP knows its owner. So we load the shop and compare. An
+  //    admin skips this. (The `!shop` guard covers the rare orphan case where a
+  //    listing's shop was deleted: then only an admin may touch it.)
+  const shop = await Shop.findById(listing.shop);
+  if (
+    req.user.role !== "admin" &&
+    (!shop || shop.owner.toString() !== req.user.id)
+  ) {
+    return next({ status: 403, message: "Forbidden" });
+  }
+
+  // 4. Validate the body against the update whitelist. Because shop and product
+  //    are NOT in the whitelist, zod strips them: even if the client sends a new
+  //    shop/product, we ignore it. WHY we forbid changing them: this listing is
+  //    "shop X's price for product Y." Silently repointing it at a different
+  //    product or shop would move a real price onto the wrong item and corrupt
+  //    the comparison data. To "move" a listing you delete it and create a new
+  //    one — an explicit action, not an accidental side effect of an edit.
+  const result = updateListingSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  // 5. Copy the validated fields onto the document and save. save() runs the
+  //    schema validators and refreshes the updatedAt timestamp.
+  Object.assign(listing, data);
+  await listing.save();
+
+  await listing.populate("product", "name nameAr imageUrl unit");
+  res.json({ listing });
+}
+
+// DELETE /api/listings/:id
+// Same permissions as updateListing. Removes the listing entirely — this is how
+// a shop stops offering a product (and the correct way to "move" a listing:
+// delete, then create a fresh one for the right shop/product).
+async function deleteListing(req, res, next) {
+  // Same id guard → load → ownership check as updateListing.
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid listing id" });
+  }
+
+  const listing = await Listing.findById(req.params.id);
+  if (!listing) {
+    return next({ status: 404, message: "Listing not found" });
+  }
+
+  const shop = await Shop.findById(listing.shop);
+  if (
+    req.user.role !== "admin" &&
+    (!shop || shop.owner.toString() !== req.user.id)
+  ) {
+    return next({ status: 403, message: "Forbidden" });
+  }
+
+  // Delete this document, then confirm. We return a small JSON message (200)
+  // rather than an empty 204 so the response is clear when testing.
+  await listing.deleteOne();
+  res.json({ message: "Listing deleted" });
+}
+
+module.exports = { createListing, updateListing, deleteListing };

@@ -190,6 +190,7 @@ async function main() {
       body: { product: productId, price: 6, inStock: true },
     });
     check("same product in shop B (price 6) → 201", r.status === 201);
+    const shopBListingId = r.body?.listing?._id; // used by the update/delete tests
 
     r = await req("POST", `/api/shops/${shopA.id}/listings`, {
       token: sellerToken,
@@ -244,6 +245,74 @@ async function main() {
       body: { product: productId, price: 9 },
     });
     check("admin can add to any shop → 201", r.status === 201);
+    const otherShopListingId = r.body?.listing?._id; // owned by otherSeller
+
+    // ================= Update: PATCH /api/listings/:id =================
+    console.log("\nPATCH /api/listings/:id");
+
+    r = await req("PATCH", `/api/listings/${shopBListingId}`, { body: { price: 8 } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("PATCH", `/api/listings/${shopBListingId}`, {
+      token: customerToken,
+      body: { price: 8 },
+    });
+    check("customer role → 403", r.status === 403);
+
+    r = await req("PATCH", "/api/listings/abc", { token: sellerToken, body: { price: 8 } });
+    check("invalid listing id → 400", r.status === 400 && r.body.error === "Invalid listing id");
+
+    r = await req("PATCH", `/api/listings/${FAKE_ID}`, { token: sellerToken, body: { price: 8 } });
+    check("listing not found → 404", r.status === 404);
+
+    r = await req("PATCH", `/api/listings/${otherShopListingId}`, {
+      token: sellerToken,
+      body: { price: 8 },
+    });
+    check("editing another seller's listing → 403", r.status === 403);
+
+    r = await req("PATCH", `/api/listings/${shopBListingId}`, {
+      token: sellerToken,
+      body: { price: -1 },
+    });
+    check("negative price → 400", r.status === 400);
+
+    r = await req("PATCH", `/api/listings/${shopBListingId}`, {
+      token: sellerToken,
+      body: { price: 8, inStock: false },
+    });
+    check("update price + inStock → 200", r.status === 200);
+    check("price updated to 8", r.body?.listing?.price === 8);
+    check("inStock updated to false", r.body?.listing?.inStock === false);
+
+    r = await req("PATCH", `/api/listings/${shopBListingId}`, {
+      token: sellerToken,
+      body: { shop: shopA.id, product: FAKE_ID, price: 10 },
+    });
+    check("shop/product in body are ignored → 200", r.status === 200);
+    check("shop unchanged (still shop B)", String(r.body?.listing?.shop) === String(shopB.id));
+    check("product unchanged", String(r.body?.listing?.product?._id) === String(productId));
+
+    // ================= Delete: DELETE /api/listings/:id =================
+    console.log("\nDELETE /api/listings/:id");
+
+    r = await req("DELETE", `/api/listings/${shopBListingId}`);
+    check("no token → 401", r.status === 401);
+
+    r = await req("DELETE", "/api/listings/abc", { token: sellerToken });
+    check("invalid listing id → 400", r.status === 400);
+
+    r = await req("DELETE", `/api/listings/${FAKE_ID}`, { token: sellerToken });
+    check("listing not found → 404", r.status === 404);
+
+    r = await req("DELETE", `/api/listings/${otherShopListingId}`, { token: sellerToken });
+    check("deleting another seller's listing → 403", r.status === 403);
+
+    r = await req("DELETE", `/api/listings/${shopBListingId}`, { token: sellerToken });
+    check("delete own listing → 200", r.status === 200);
+
+    r = await req("DELETE", `/api/listings/${shopBListingId}`, { token: sellerToken });
+    check("deleting it again → 404 (it's really gone)", r.status === 404);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
