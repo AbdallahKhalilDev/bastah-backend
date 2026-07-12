@@ -181,4 +181,40 @@ async function deleteListing(req, res, next) {
   res.json({ message: "Listing deleted" });
 }
 
-module.exports = { createListing, updateListing, deleteListing };
+// GET /api/shops/:shopId/products
+// Public. Returns every listing for one shop, each with its product's details
+// attached — this powers the Store Profile page's product list. It's the mirror
+// image of the comparison query (which fixes a product and gathers shops); here
+// we fix a shop and gather its products.
+async function listShopProducts(req, res, next) {
+  // 1. Guard the shop id from the URL (else find throws a CastError on junk).
+  if (!mongoose.Types.ObjectId.isValid(req.params.shopId)) {
+    return next({ status: 400, message: "Invalid shop id" });
+  }
+
+  // 2. Make sure the shop exists AND is visible. We hide inactive shops with a
+  //    404 exactly like the public getShop does — this endpoint feeds the same
+  //    public Store Profile page, so its visibility rules must match (we don't
+  //    reveal a hidden shop by leaking its product list).
+  const shop = await Shop.findById(req.params.shopId);
+  if (!shop || !shop.isActive) {
+    return next({ status: 404, message: "Shop not found" });
+  }
+
+  // 3. Fetch this shop's listings, newest first, and swap each product id for a
+  //    slim slice of the product (the fields the profile card needs). Each
+  //    listing already carries its own price and inStock. A shop with no
+  //    listings simply gives back [] — an empty list is a valid answer (200).
+  const listings = await Listing.find({ shop: req.params.shopId })
+    .sort({ createdAt: -1 })
+    .populate("product", "name nameAr imageUrl unit category");
+
+  res.json({ listings });
+}
+
+module.exports = {
+  createListing,
+  updateListing,
+  deleteListing,
+  listShopProducts,
+};

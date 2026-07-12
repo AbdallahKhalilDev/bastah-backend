@@ -116,6 +116,12 @@ async function main() {
     name: "Other Shop",
     phone: "3",
   });
+  const inactiveShop = await Shop.create({
+    owner: seller._id,
+    name: "Hidden Shop",
+    phone: "4",
+    isActive: false,
+  });
 
   const sellerToken = tokenFor(seller);
   const adminToken = tokenFor(admin);
@@ -313,6 +319,30 @@ async function main() {
 
     r = await req("DELETE", `/api/listings/${shopBListingId}`, { token: sellerToken });
     check("deleting it again → 404 (it's really gone)", r.status === 404);
+
+    // =========== A shop's products: GET /api/shops/:shopId/products ===========
+    console.log("\nGET /api/shops/:shopId/products");
+
+    // Public — no token needed. Shop A still has its sugar listing (price 5).
+    r = await req("GET", `/api/shops/${shopA.id}/products`);
+    check("public (no token) → 200", r.status === 200);
+    check("returns an array of listings", Array.isArray(r.body?.listings));
+    const sugarListing = r.body?.listings?.find((l) => l.product?.name === "Sugar");
+    check("listing carries its product, populated", sugarListing?.product?.nameAr === "سكر");
+    check("listing carries price and inStock", sugarListing?.price === 5 && sugarListing?.inStock === true);
+
+    // Shop B's only listing was deleted above, so it has none now.
+    r = await req("GET", `/api/shops/${shopB.id}/products`);
+    check("shop with no listings → 200 with []", r.status === 200 && Array.isArray(r.body.listings) && r.body.listings.length === 0);
+
+    r = await req("GET", "/api/shops/abc/products");
+    check("invalid shop id → 400", r.status === 400 && r.body.error === "Invalid shop id");
+
+    r = await req("GET", `/api/shops/${FAKE_ID}/products`);
+    check("shop not found → 404", r.status === 404);
+
+    r = await req("GET", `/api/shops/${inactiveShop.id}/products`);
+    check("inactive shop is hidden → 404", r.status === 404);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

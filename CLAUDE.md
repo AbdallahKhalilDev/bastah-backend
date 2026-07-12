@@ -52,7 +52,7 @@ add-to-cart, wishlist, and reviews/ratings.
 The full data model, all endpoints grouped by page, and the ordered build plan
 are in **`docs/ROADMAP.md`**. Read it before starting a work session.
 
-**Progress:** Steps 1–4 done and committed:
+**Progress:** Steps 1–5 done and committed:
 - Step 1 — scaffold + `/api/health` + Mongo connection.
 - Step 2 — Auth + roles (User model; register & login with bcrypt + JWT;
   `auth` and `requireRole` middleware; `GET /api/auth/me`).
@@ -64,7 +64,15 @@ are in **`docs/ROADMAP.md`**. Read it before starting a work session.
   with a whitelist that blocks owner/isVerified/rating fields and a per-shop
   ownership check on edit. `node scripts/setRole.js <email> <role>` promotes a
   user to seller/admin for testing).
+- Step 5 — Products + Listings (Product model; Listing model with the unique
+  `(shop, product)` index. Seller/admin: `POST /api/products`,
+  `POST /api/shops/:shopId/listings` (own shop only; 409 on duplicate),
+  `PATCH /api/listings/:id` and `DELETE /api/listings/:id` (price/stock only,
+  owner or admin). Public: `GET /api/shops/:shopId/products`. Added an automated
+  test harness — `npm test` runs `tests/api.test.js` against a throwaway
+  `bastah_test` DB; extend it as new endpoints are built).
 
-Next: Step 5 — Products + Listings (Product model; Listing model with the unique
-`(shop, product)` index; seller endpoints to add a product, add a listing, and
-update price/stock).
+Next: Step 6 — Search + price comparison (public `GET /api/products` and
+`GET /api/products/:id`; product search with filters/sort; and the headline
+`GET /api/products/:id/listings` that gathers every shop's price for one product,
+cheapest-first — the comparison feature Step 5 laid the groundwork for).
