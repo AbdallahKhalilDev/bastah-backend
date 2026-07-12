@@ -409,6 +409,57 @@ async function main() {
 
     r = await req("GET", `/api/products/${FAKE_ID}/listings`);
     check("missing product → 404", r.status === 404);
+
+    // ================= Search: GET /api/products/search =================
+    console.log("\nGET /api/products/search");
+
+    // Add a second category + a product in it, so category filtering separates
+    // things (until now every product was in "Grocery").
+    const cat2 = await Category.create({ name: "Electronics", nameAr: "إلكترونيات", slug: "electronics-test" });
+    await Product.create({ name: "Phone Charger", nameAr: "شاحن هاتف", category: cat2._id });
+
+    r = await req("GET", "/api/products/search?q=sug");
+    check(
+      "q=sug finds Sugar (partial, case-insensitive)",
+      r.status === 200 &&
+        r.body.products.some((p) => p.name === "Sugar") &&
+        r.body.products.every((p) => /sug/i.test(p.name) || /sug/i.test(p.nameAr))
+    );
+
+    r = await req("GET", "/api/products/search?q=" + encodeURIComponent("("));
+    check("q='(' does not crash (regex escaped) → 200", r.status === 200);
+
+    r = await req("GET", `/api/products/search?category=${cat2._id}`);
+    check(
+      "filter by category → only that category's product",
+      r.body?.total === 1 && r.body.products[0]?.name === "Phone Charger"
+    );
+
+    r = await req("GET", "/api/products/search?category=abc");
+    check("bad category id → 400", r.status === 400 && r.body.error === "Invalid category id");
+
+    r = await req("GET", "/api/products/search?sort=bogus");
+    check("unknown sort falls back (200, not 500)", r.status === 200);
+
+    r = await req("GET", "/api/products/search?sort=name&limit=50");
+    const names = (r.body?.products || []).map((p) => p.name);
+    let ascending = names.length > 1;
+    for (let i = 1; i < names.length; i++) if (names[i] < names[i - 1]) ascending = false;
+    check("sort=name returns A→Z order", ascending);
+
+    r = await req("GET", `/api/products/search?q=charg&category=${cat2._id}`);
+    check(
+      "combined q + category narrows to Phone Charger",
+      r.body?.total === 1 && r.body.products[0]?.name === "Phone Charger"
+    );
+
+    r = await req("GET", "/api/products/search?limit=2");
+    check("pagination echoes in search", r.body?.limit === 2 && r.body?.products?.length === 2);
+
+    // Proves the route ordering: /search reached searchProducts, not /:id
+    // (if /:id had captured it, "search" would be an invalid id → 400).
+    r = await req("GET", "/api/products/search");
+    check("/search resolves to search, not /:id", r.status === 200 && Array.isArray(r.body?.products));
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

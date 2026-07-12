@@ -6,6 +6,7 @@ const {
   createProduct,
   listProducts,
   getProduct,
+  searchProducts,
 } = require("../controllers/product.controller");
 const { listProductListings } = require("../controllers/listing.controller");
 
@@ -21,6 +22,9 @@ const router = express.Router();
 
 // Public reads (no auth).
 router.get("/", asyncHandler(listProducts)); // browse, paginated
+// Search MUST be registered before "/:id" — otherwise "/api/products/search"
+// would be matched by "/:id" (treating the word "search" as a product id).
+router.get("/search", asyncHandler(searchProducts));
 router.get("/:id", asyncHandler(getProduct)); // one product's details
 // Price comparison: every shop's price for one product, cheapest first. Two
 // segments (/:id/listings), so it never clashes with the one-segment /:id above.

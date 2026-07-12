@@ -103,4 +103,60 @@ async function getProduct(req, res, next) {
   res.json({ product });
 }
 
-module.exports = { createProduct, listProducts, getProduct };
+// Escapes regex special characters in user input so we can safely build a regex
+// from it. Without this, a search for "(" would be an INVALID regex and throw a
+// 500 — and a crafted input could make the regex do surprising things. This
+// turns every special char (. * + ? ( ) [ ] etc.) into a plain literal.
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// GET /api/products/search
+// Public. Search the catalog by text, optionally filter by category, choose a
+// sort, and page the results. Every param is OPTIONAL: with no params it behaves
+// just like the browse list. We validate defensively — a bad category id is a
+// 400, but an unknown sort value simply falls back to the default (never a crash).
+async function searchProducts(req, res, next) {
+  const { page, limit, skip } = parsePagination(req.query);
+
+  // We build up a MongoDB "filter" object piece by piece. An empty {} matches
+  // everything; each param we're given adds another condition to narrow it.
+  const filter = {};
+
+  // q — case-insensitive PARTIAL text match on name OR nameAr. We use a regex:
+  // new RegExp("sug", "i") matches "Sugar", "sugar cane", etc. ($or = "either
+  // field can match"). Approach note: a regex is the simple way to match a
+  // substring as the user types; a MongoDB text index would scale better on a
+  // huge catalog but only matches whole words, so regex fits this MVP.
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  if (q) {
+    const rx = new RegExp(escapeRegex(q), "i");
+    filter.$or = [{ name: rx }, { nameAr: rx }];
+  }
+
+  // category — filter to one category. It's a real id the caller supplied, so a
+  // malformed one is their mistake → 400 (same rule as everywhere else).
+  if (req.query.category) {
+    if (!mongoose.Types.ObjectId.isValid(req.query.category)) {
+      return next({ status: 400, message: "Invalid category id" });
+    }
+    filter.category = req.query.category;
+  }
+
+  // sort — a small whitelist. "name" sorts A→Z; anything else (including
+  // "newest", an unknown value, or nothing) falls back to newest-first. An
+  // unexpected value never errors, it just uses the default.
+  const sort = req.query.sort === "name" ? { name: 1 } : { createdAt: -1 };
+
+  // Same paginated shape as the browse list.
+  const total = await Product.countDocuments(filter);
+  const products = await Product.find(filter)
+    .sort(sort)
+    .skip(skip)
+    .limit(limit)
+    .populate("category", "name nameAr");
+
+  res.json({ products, page, limit, total });
+}
+
+module.exports = { createProduct, listProducts, getProduct, searchProducts };
