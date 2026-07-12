@@ -76,7 +76,14 @@ async function main() {
   const Listing = require("../models/Listing");
   const Product = require("../models/Product");
   const Review = require("../models/Review");
-  await Promise.all([Listing.init(), Product.init(), Shop.init(), Review.init()]);
+  const Cart = require("../models/Cart");
+  await Promise.all([
+    Listing.init(),
+    Product.init(),
+    Shop.init(),
+    Review.init(),
+    Cart.init(),
+  ]);
 
   // --- seed data ---
   const category = await Category.create({
@@ -649,6 +656,72 @@ async function main() {
     r = await req("GET", `/api/shops/${shopA.id}`);
     check("last review gone → ratingCount 0", r.body?.shop?.ratingCount === 0);
     check("last review gone → ratingAvg 0", r.body?.shop?.ratingAvg === 0);
+
+    // ======================= Cart fixtures ==========================
+    // A couple of real, ACTIVE listings in two DIFFERENT shops, so the cart tests
+    // can prove that items from multiple shops coexist. Created directly (we've
+    // already tested the listing endpoints above).
+    const cartProductA = await Product.create({
+      name: "Cart Milk",
+      nameAr: "حليب",
+      category: category._id,
+      unit: "L",
+    });
+    const cartProductB = await Product.create({
+      name: "Cart Bread",
+      nameAr: "خبز",
+      category: category._id,
+      unit: "piece",
+    });
+    // shopA is active; otherShop is active — two different shops.
+    const cartListingA = await Listing.create({
+      shop: shopA._id,
+      product: cartProductA._id,
+      price: 10,
+    });
+    const cartListingB = await Listing.create({
+      shop: otherShop._id,
+      product: cartProductB._id,
+      price: 4,
+    });
+
+    // ================= Cart: GET /api/cart =================
+    console.log("\nGET /api/cart");
+
+    r = await req("GET", "/api/cart");
+    check("no token → 401", r.status === 401);
+
+    r = await req("GET", "/api/cart", { token: sellerToken });
+    check("non-customer (seller) → 403", r.status === 403);
+
+    // `customer` has never touched their cart → no cart document yet. That's an
+    // empty cart (200), NOT a 404.
+    r = await req("GET", "/api/cart", { token: customerToken });
+    check("new customer with no cart → 200", r.status === 200);
+    check("empty cart shape { cart: { items: [] } }", Array.isArray(r.body?.cart?.items) && r.body.cart.items.length === 0);
+
+    // Seed a THROWAWAY customer's cart directly (one item, qty 2) to prove the
+    // populated read shape without needing the POST endpoint (that's Slice 3).
+    const seedCustomer = await User.create({
+      name: "Seed Customer",
+      email: "seed@test.com",
+      passwordHash: "x",
+      role: "customer",
+    });
+    const seedCustomerToken = tokenFor(seedCustomer);
+    await Cart.create({
+      customer: seedCustomer._id,
+      items: [{ listing: cartListingA._id, quantity: 2 }],
+    });
+
+    r = await req("GET", "/api/cart", { token: seedCustomerToken });
+    check("seeded cart → 200", r.status === 200);
+    check("cart has 1 item with quantity 2", r.body?.cart?.items?.length === 1 && r.body.cart.items[0].quantity === 2);
+    const seedItem = r.body?.cart?.items?.[0];
+    check("item shows the LIVE listing price (10)", seedItem?.listing?.price === 10);
+    check("item's product populated (name/nameAr)", seedItem?.listing?.product?.name === "Cart Milk" && seedItem?.listing?.product?.nameAr === "حليب");
+    check("item's shop populated with safe fields", seedItem?.listing?.shop?.name === "Shop A" && seedItem?.listing?.shop?.phone !== undefined);
+    check("no owner leaked on the shop", seedItem?.listing?.shop?.owner === undefined);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
