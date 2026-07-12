@@ -12,7 +12,10 @@ const {
   createListing,
   listShopProducts,
 } = require("../controllers/listing.controller");
-const { createReview } = require("../controllers/review.controller");
+const {
+  createReview,
+  listShopReviews,
+} = require("../controllers/review.controller");
 
 const router = express.Router();
 
@@ -25,6 +28,9 @@ router.get("/:id", asyncHandler(getShop));
 // A shop's product list (its listings, each with the product's details). Public,
 // like the other reads. Two-segment path, so it never clashes with GET /:id.
 router.get("/:shopId/products", asyncHandler(listShopProducts));
+// A shop's reviews, newest first (each with the author's NAME only). Public, and
+// another two-segment path that never clashes with GET /:id.
+router.get("/:shopId/reviews", asyncHandler(listShopReviews));
 
 // Create a shop. Middleware runs left-to-right BEFORE the controller:
 //   auth                       → verifies the token, sets req.user (else 401)

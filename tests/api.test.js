@@ -548,6 +548,33 @@ async function main() {
     r = await req("GET", `/api/shops/${shopA.id}`);
     check("two reviews → ratingCount 2", r.body?.shop?.ratingCount === 2);
     check("two reviews (5,2) → ratingAvg 3.5", r.body?.shop?.ratingAvg === 3.5);
+
+    // ============ Reviews: GET /api/shops/:shopId/reviews ============
+    console.log("\nGET /api/shops/:shopId/reviews");
+
+    // Public — no token needed. Shop A has 2 reviews now.
+    r = await req("GET", `/api/shops/${shopA.id}/reviews`);
+    check("public (no token) → 200", r.status === 200);
+    check("returns both reviews", Array.isArray(r.body?.reviews) && r.body.reviews.length === 2);
+    check("total echoed as 2", r.body?.total === 2);
+    // Newest first: customer2's review (rating 2) was posted last.
+    check("newest first (rating 2 leads)", r.body?.reviews?.[0]?.rating === 2);
+    check("author populated with name", r.body?.reviews?.[0]?.author?.name === "Second Customer");
+    check("author email NOT leaked", r.body?.reviews?.[0]?.author?.email === undefined);
+
+    // Shop B has no reviews.
+    r = await req("GET", `/api/shops/${shopB.id}/reviews`);
+    check("shop with no reviews → 200 with []", r.status === 200 && Array.isArray(r.body.reviews) && r.body.reviews.length === 0);
+
+    // Pagination behaves like the product endpoints.
+    r = await req("GET", `/api/shops/${shopA.id}/reviews?limit=1`);
+    check("limit=1 → 1 review, total still 2", r.body?.reviews?.length === 1 && r.body?.total === 2);
+
+    r = await req("GET", "/api/shops/abc/reviews");
+    check("invalid shop id → 400", r.status === 400 && r.body.error === "Invalid shop id");
+
+    r = await req("GET", `/api/shops/${FAKE_ID}/reviews`);
+    check("shop not found → 404", r.status === 404);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

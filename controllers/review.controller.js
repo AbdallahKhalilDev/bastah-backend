@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { z } = require("zod");
 const Review = require("../models/Review");
 const Shop = require("../models/Shop");
+const parsePagination = require("../utils/pagination");
 
 // --- Input validation ---------------------------------------------------
 // A WHITELIST for creating a review. Only these two keys are accepted; zod strips
@@ -113,4 +114,41 @@ async function createReview(req, res, next) {
   res.status(201).json({ review });
 }
 
-module.exports = { recalcShopRating, createReview };
+// GET /api/shops/:shopId/reviews
+// Public (no auth). Returns a shop's reviews, newest first, in PAGES — this feeds
+// the reviews section on a shop's profile page.
+async function listShopReviews(req, res, next) {
+  // 1. Guard the shop id from the URL (else find would throw a CastError on junk).
+  if (!mongoose.Types.ObjectId.isValid(req.params.shopId)) {
+    return next({ status: 400, message: "Invalid shop id" });
+  }
+
+  // 2. Make sure the shop exists → 404 if not. (The spec asks only for "missing"
+  //    here, so we don't hide inactive shops on this read.)
+  const shop = await Shop.findById(req.params.shopId);
+  if (!shop) {
+    return next({ status: 404, message: "Shop not found" });
+  }
+
+  // 3. Turn ?page / ?limit into trustworthy numbers (+ the skip offset), the same
+  //    way the product browse/search endpoints do.
+  const { page, limit, skip } = parsePagination(req.query);
+
+  // 4. countDocuments is a separate, cheap query: how many reviews this shop has
+  //    in TOTAL (across all pages), so a frontend can show "page 1 of N".
+  const total = await Review.countDocuments({ shop: req.params.shopId });
+
+  // 5. The actual page: this shop's reviews, newest first, jump over `skip`, take
+  //    `limit`. CRITICAL for privacy: populate the author with ONLY their name —
+  //    the second argument is a whitelist, so email/passwordHash can never leak
+  //    on this public endpoint. A shop with no reviews simply gives back [] (200).
+  const reviews = await Review.find({ shop: req.params.shopId })
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .populate("author", "name");
+
+  res.json({ reviews, page, limit, total });
+}
+
+module.exports = { recalcShopRating, createReview, listShopReviews };
