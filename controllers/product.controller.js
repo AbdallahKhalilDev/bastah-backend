@@ -3,6 +3,7 @@ const { z } = require("zod");
 const Product = require("../models/Product");
 const Category = require("../models/Category");
 const parsePagination = require("../utils/pagination");
+const homeQueries = require("../utils/homeQueries");
 
 // --- Input validation ---------------------------------------------------
 // zod describes exactly what a valid "create product" body looks like. It is a
@@ -17,6 +18,15 @@ const createProductSchema = z.object({
   category: z.string().min(1, "Category is required"),
   unit: z.string().optional(),
   imageUrl: z.string().optional(),
+});
+
+// The body for the admin-only "feature / un-feature" route. It's a single
+// required boolean: `true` promotes the product to the Home page, `false` removes
+// it. We take an EXPLICIT value (rather than blindly toggling) so the call is
+// idempotent — sending { isFeatured: true } twice leaves the product featured,
+// with no surprise flip.
+const setFeaturedSchema = z.object({
+  isFeatured: z.boolean(),
 });
 
 // POST /api/products
@@ -159,4 +169,71 @@ async function searchProducts(req, res, next) {
   res.json({ products, page, limit, total });
 }
 
-module.exports = { createProduct, listProducts, getProduct, searchProducts };
+// GET /api/products/featured
+// Public. The Home page's "featured offers" strip: products an admin has flagged
+// (isFeatured: true), newest first, capped by ?limit (default 10). The empty →
+// newest fallback lives in the helper, so this handler stays tiny: it never
+// returns an empty list while there ARE products in the catalog. This is a small,
+// fixed-size list, not a paged one, so we reply with just { products }.
+async function getFeaturedProducts(req, res, next) {
+  const limit = homeQueries.clampLimit(req.query, 10);
+  const products = await homeQueries.getFeaturedProducts({ limit });
+  res.json({ products });
+}
+
+// GET /api/products/new
+// Public. "New arrivals" — the newest products by createdAt. Unlike /featured,
+// this one KEEPS full pagination (page/limit/skip + a total count), reusing the
+// same parsePagination helper and the same { products, page, limit, total } shape
+// as the main browse list, so a frontend can page through everything new.
+async function getNewArrivals(req, res, next) {
+  const { page, limit, skip } = parsePagination(req.query);
+  const total = await Product.countDocuments({});
+  const products = await homeQueries.getNewArrivals({ limit, skip });
+  res.json({ products, page, limit, total });
+}
+
+// PATCH /api/products/:id/feature
+// Admin only (auth + requireRole("admin") run first, in the route). Featuring is
+// an EDITORIAL decision — like verifying a shop — so a seller must never be able
+// to do it. We keep this on its own admin-gated route instead of adding
+// `isFeatured` to the create/update whitelist, which would let any seller flag
+// their own product. Body: { isFeatured: true|false }.
+async function setFeatured(req, res, next) {
+  // 1. Validate the body: exactly one required boolean. safeParse gives us a
+  //    readable 400 instead of throwing.
+  const result = setFeaturedSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  // 2. Guard the id FIRST (else findById throws a CastError on junk like "abc").
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid product id" });
+  }
+
+  // 3. Load the product. A well-formed id matching nothing → 404.
+  const product = await Product.findById(req.params.id);
+  if (!product) {
+    return next({ status: 404, message: "Product not found" });
+  }
+
+  // 4. Set the flag to the requested value (not a toggle — idempotent), save, and
+  //    return the product with its category populated like the other reads.
+  product.isFeatured = data.isFeatured;
+  await product.save();
+  await product.populate("category", "name nameAr");
+  res.json({ product });
+}
+
+module.exports = {
+  createProduct,
+  listProducts,
+  getProduct,
+  searchProducts,
+  getFeaturedProducts,
+  getNewArrivals,
+  setFeatured,
+};

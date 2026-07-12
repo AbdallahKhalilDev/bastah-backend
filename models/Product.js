@@ -51,6 +51,16 @@ const productSchema = new mongoose.Schema(
       trim: true,
       // optional — a product can exist without a picture
     },
+    // Whether this product is "featured" on the Home page. This is an
+    // EDITORIAL / admin-only flag, exactly like a shop's `isVerified`: a seller
+    // must not be able to promote their own product to the front page, so it's
+    // NOT part of the create/update whitelist and can only be flipped via the
+    // admin-only `PATCH /api/products/:id/feature` route. Defaults to false, so
+    // every product starts un-featured.
+    isFeatured: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     // Mongoose auto-adds and maintains `createdAt` and `updatedAt` timestamps.

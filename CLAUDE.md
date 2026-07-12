@@ -105,8 +105,23 @@ are in **`docs/ROADMAP.md`**. Read it before starting a work session.
   `DELETE /api/cart` empties it. The route param is the LISTING id because items
   have no id of their own and a listing appears at most once per cart.
 
-Next: Step 9 — Wishlist (one Wishlist per customer; `products: [→Product]`).
-`GET /api/wishlist`, `POST /api/wishlist/:productId` to save, and
-`DELETE /api/wishlist/:productId` to unsave. Unlike the cart, a wishlist saves a
-bare PRODUCT (not a listing) — it's "save this item to look at later," not "this
-shop's price." This is "save products".
+**Build-order note (why Step 9 comes AFTER Step 10):** Steps 1–8 are complete.
+Step 9 (Wishlist) is **INTENTIONALLY DEFERRED, not skipped** — it is designed and
+scoped in `docs/ROADMAP.md`, but it's an isolated, non-core feature that nothing
+else depends on, so we prioritized Step 10 (the Home page, which is core to the
+project's first-two-pages scope) first. Step 10 has no dependency on Step 9.
+
+Now building: Step 10 — Home aggregation (composes existing data; no new models).
+Endpoints: `GET /api/products/featured` (isFeatured products, newest first, capped;
+falls back to newest if none flagged), `GET /api/products/new` (new arrivals,
+paginated), `GET /api/shops/top` (active shops by ratingAvg desc, then ratingCount
+desc), and a bundled `GET /api/home` returning `{ featured, newArrivals, topStores }`.
+Featuring is an admin-only editorial decision (like a shop's `isVerified`): added
+`isFeatured` (default false) to Product, set only via admin-only
+`PATCH /api/products/:id/feature` — a seller can never feature their own product.
+
+Next after Step 10: circle back to Step 9 — Wishlist (one Wishlist per customer;
+`products: [→Product]`). `GET /api/wishlist`, `POST /api/wishlist/:productId` to
+save, and `DELETE /api/wishlist/:productId` to unsave. Unlike the cart, a wishlist
+saves a bare PRODUCT (not a listing) — it's "save this item to look at later," not
+"this shop's price." This is "save products".

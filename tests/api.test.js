@@ -895,6 +895,88 @@ async function main() {
     // Clearing customer1's cart left customer2's cart untouched.
     r = await req("GET", "/api/cart", { token: customer2Token });
     check("customer2's cart is unaffected by customer1 clearing", r.body?.cart?.items?.length === 1 && findItem(r.body, "Cart Bread")?.quantity === 7);
+
+    // ========= Home (Step 10, Slice 1): featured + new arrivals =========
+    console.log("\nGET /api/products/featured + /new, PATCH /:id/feature");
+
+    // --- FALLBACK: nothing is featured yet ---
+    // No product has been flagged at this point, so /featured must NOT be empty —
+    // it falls back to the newest products so the homepage strip is never blank.
+    let rAll = await req("GET", "/api/products?limit=1");
+    const totalProducts = rAll.body?.total; // how many products exist right now
+    r = await req("GET", "/api/products/featured");
+    const fallbackFeatured = r.body?.products || [];
+    check("featured (none flagged) → non-empty fallback to newest", fallbackFeatured.length > 0);
+    check("featured fallback size = min(10, total)", fallbackFeatured.length === Math.min(10, totalProducts));
+    const fbTimes = fallbackFeatured.map((p) => new Date(p.createdAt).getTime());
+    check("featured fallback is newest-first", fbTimes.every((t, i) => i === 0 || fbTimes[i - 1] >= t));
+    check(
+      "featured populates category name/nameAr only (no slug)",
+      !!fallbackFeatured[0]?.category?.name && fallbackFeatured[0]?.category?.slug === undefined
+    );
+
+    // Two products to feature. We set createdAt explicitly (save with
+    // timestamps:false so Mongoose doesn't overwrite it) so featNew is provably
+    // newer than featOld — that makes the newest-first assertions deterministic
+    // instead of depending on same-millisecond insertion order. featNew's time is
+    // "now", so it's also the newest product in the whole catalog.
+    const nowMs = Date.now();
+    const featOld = await new Product({
+      name: "Featured Old", nameAr: "مميز قديم", category: category._id,
+      createdAt: new Date(nowMs - 60000), updatedAt: new Date(nowMs - 60000),
+    }).save({ timestamps: false });
+    const featNew = await new Product({
+      name: "Featured New", nameAr: "مميز جديد", category: category._id,
+      createdAt: new Date(nowMs), updatedAt: new Date(nowMs),
+    }).save({ timestamps: false });
+
+    // --- ROLE GATE on the admin-only feature route ---
+    r = await req("PATCH", `/api/products/${featOld.id}/feature`, { body: { isFeatured: true } });
+    check("feature: no token → 401", r.status === 401);
+    r = await req("PATCH", `/api/products/${featOld.id}/feature`, { token: sellerToken, body: { isFeatured: true } });
+    check("feature: seller → 403 (editorial, admin only)", r.status === 403);
+    r = await req("PATCH", `/api/products/${featOld.id}/feature`, { token: customerToken, body: { isFeatured: true } });
+    check("feature: customer → 403", r.status === 403);
+
+    // --- validation + not-found on the feature route ---
+    r = await req("PATCH", `/api/products/${featOld.id}/feature`, { token: adminToken, body: { isFeatured: "yes" } });
+    check("feature: non-boolean body → 400", r.status === 400);
+    r = await req("PATCH", `/api/products/${FAKE_ID}/feature`, { token: adminToken, body: { isFeatured: true } });
+    check("feature: missing product → 404", r.status === 404);
+    r = await req("PATCH", "/api/products/abc/feature", { token: adminToken, body: { isFeatured: true } });
+    check("feature: invalid id → 400", r.status === 400 && r.body.error === "Invalid product id");
+
+    // --- admin flags both (and proves the SET is idempotent) ---
+    r = await req("PATCH", `/api/products/${featOld.id}/feature`, { token: adminToken, body: { isFeatured: true } });
+    check("feature: admin sets true → 200 + isFeatured true", r.status === 200 && r.body?.product?.isFeatured === true);
+    check("feature: response populates category", r.body?.product?.category?.name === "Grocery");
+    r = await req("PATCH", `/api/products/${featOld.id}/feature`, { token: adminToken, body: { isFeatured: true } });
+    check("feature: setting true again is idempotent (still true)", r.body?.product?.isFeatured === true);
+    await req("PATCH", `/api/products/${featNew.id}/feature`, { token: adminToken, body: { isFeatured: true } });
+
+    // --- FILTERED: /featured now returns ONLY the flagged products, newest first ---
+    r = await req("GET", "/api/products/featured");
+    const featured = r.body?.products || [];
+    const featuredIds = featured.map((p) => p._id);
+    check("featured now returns exactly the 2 flagged products", featured.length === 2);
+    check("featured are newest-first (featNew before featOld)", featuredIds[0] === featNew.id && featuredIds[1] === featOld.id);
+    check("featured excludes un-flagged products", !featuredIds.includes(productId));
+
+    // --- un-feature works too (set false removes it) ---
+    r = await req("PATCH", `/api/products/${featOld.id}/feature`, { token: adminToken, body: { isFeatured: false } });
+    check("feature: admin sets false → 200 + isFeatured false", r.status === 200 && r.body?.product?.isFeatured === false);
+    r = await req("GET", "/api/products/featured");
+    check("un-featured product drops out of /featured", !(r.body?.products || []).map((p) => p._id).includes(featOld.id));
+
+    // --- NEW ARRIVALS: newest-first + respects limit + paginated shape ---
+    r = await req("GET", "/api/products/new?limit=3");
+    const newArr = r.body?.products || [];
+    check("new: respects limit (3)", newArr.length === 3);
+    check("new: paginated shape (page/limit/total)", r.body?.page === 1 && r.body?.limit === 3 && r.body?.total === totalProducts + 2);
+    const naTimes = newArr.map((p) => new Date(p.createdAt).getTime());
+    check("new: sorted newest-first by createdAt", naTimes.every((t, i) => i === 0 || naTimes[i - 1] >= t));
+    check("new: most recently created product (featNew) is first", newArr[0]?._id === featNew.id);
+    check("new: category populated name/nameAr only", !!newArr[0]?.category?.name && newArr[0]?.category?.slug === undefined);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
