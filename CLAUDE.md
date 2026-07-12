@@ -52,11 +52,19 @@ add-to-cart, wishlist, and reviews/ratings.
 The full data model, all endpoints grouped by page, and the ordered build plan
 are in **`docs/ROADMAP.md`**. Read it before starting a work session.
 
-**Progress:** Steps 1–3 done and committed:
+**Progress:** Steps 1–4 done and committed:
 - Step 1 — scaffold + `/api/health` + Mongo connection.
 - Step 2 — Auth + roles (User model; register & login with bcrypt + JWT;
   `auth` and `requireRole` middleware; `GET /api/auth/me`).
 - Step 3 — Categories (Category model; public `GET /api/categories` and
   `GET /api/categories/:id`; idempotent `npm run seed:categories`).
+- Step 4 — Shops (Shop model with denormalized `ratingAvg`/`ratingCount`;
+  public `GET /api/shops` (active only) and `GET /api/shops/:id` (hides
+  inactive); `POST /api/shops` and `PATCH /api/shops/:id` for sellers/admins,
+  with a whitelist that blocks owner/isVerified/rating fields and a per-shop
+  ownership check on edit. `node scripts/setRole.js <email> <role>` promotes a
+  user to seller/admin for testing).
 
-Next: Step 4 — Shops (create/update for sellers + public browse/profile).
+Next: Step 5 — Products + Listings (Product model; Listing model with the unique
+`(shop, product)` index; seller endpoints to add a product, add a listing, and
+update price/stock).
