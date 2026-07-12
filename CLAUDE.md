@@ -52,7 +52,7 @@ add-to-cart, wishlist, and reviews/ratings.
 The full data model, all endpoints grouped by page, and the ordered build plan
 are in **`docs/ROADMAP.md`**. Read it before starting a work session.
 
-**Progress:** Steps 1–5 done and committed:
+**Progress:** Steps 1–6 done and committed:
 - Step 1 — scaffold + `/api/health` + Mongo connection.
 - Step 2 — Auth + roles (User model; register & login with bcrypt + JWT;
   `auth` and `requireRole` middleware; `GET /api/auth/me`).
@@ -71,8 +71,16 @@ are in **`docs/ROADMAP.md`**. Read it before starting a work session.
   owner or admin). Public: `GET /api/shops/:shopId/products`. Added an automated
   test harness — `npm test` runs `tests/api.test.js` against a throwaway
   `bastah_test` DB; extend it as new endpoints are built).
+- Step 6 — Search + price comparison (all public, read-only). `GET /api/products`
+  (paginated: `?page`/`?limit`, cap 50, returns `{ products, page, limit, total }`)
+  and `GET /api/products/:id`; the headline `GET /api/products/:id/listings` that
+  returns every ACTIVE shop's price for one product, cheapest-first, exposing only
+  safe shop fields; and `GET /api/products/search` (`?q` partial regex on
+  name/nameAr, `?category`, `?sort=newest|name`, paginated). Added
+  `utils/pagination.js` and two idempotent seeds: `npm run seed:products` (24 demo
+  products) and `npm run seed:listings` (4 demo shops + listings).
 
-Next: Step 6 — Search + price comparison (public `GET /api/products` and
-`GET /api/products/:id`; product search with filters/sort; and the headline
-`GET /api/products/:id/listings` that gathers every shop's price for one product,
-cheapest-first — the comparison feature Step 5 laid the groundwork for).
+Next: Step 7 — Reviews (Review model targeting shops; public
+`GET /api/shops/:id/reviews`; `POST /api/shops/:id/reviews` for logged-in
+customers; keep the shop's denormalized `ratingAvg`/`ratingCount` updated on each
+new review — this lights up Top Stores and seller ratings).
