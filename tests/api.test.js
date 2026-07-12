@@ -799,6 +799,102 @@ async function main() {
     check("add listing from another shop → 2 items", r.body?.cart?.items?.length === 2);
     check("both shops represented", findItem(r.body, "Cart Milk")?.listing?.shop?.name === "Shop A" && findItem(r.body, "Cart Bread")?.listing?.shop?.name === "Other Shop");
     check("listing B shows its own live price (4)", findItem(r.body, "Cart Bread")?.listing?.price === 4);
+
+    // ============ Cart: PATCH /api/cart/items/:listingId ============
+    console.log("\nPATCH /api/cart/items/:listingId");
+    // State: customer's cart = Cart Milk x5, Cart Bread x1.
+
+    r = await req("PATCH", `/api/cart/items/${cartListingA.id}`, { body: { quantity: 2 } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("PATCH", `/api/cart/items/${cartListingA.id}`, {
+      token: sellerToken,
+      body: { quantity: 2 },
+    });
+    check("non-customer (seller) → 403", r.status === 403);
+
+    r = await req("PATCH", "/api/cart/items/abc", {
+      token: customerToken,
+      body: { quantity: 2 },
+    });
+    check("invalid listing id → 400", r.status === 400 && r.body.error === "Invalid listing id");
+
+    r = await req("PATCH", `/api/cart/items/${cartListingA.id}`, {
+      token: customerToken,
+      body: {},
+    });
+    check("missing quantity → 400", r.status === 400);
+
+    r = await req("PATCH", `/api/cart/items/${cartListingA.id}`, {
+      token: customerToken,
+      body: { quantity: 0 },
+    });
+    check("quantity 0 → 400", r.status === 400);
+
+    // A well-formed listing id that isn't in the cart → 404 (can't set what isn't there).
+    r = await req("PATCH", `/api/cart/items/${FAKE_ID}`, {
+      token: customerToken,
+      body: { quantity: 2 },
+    });
+    check("listing not in cart → 404", r.status === 404);
+
+    // SET Cart Milk from 5 to 2 (proves PATCH sets, it doesn't add).
+    r = await req("PATCH", `/api/cart/items/${cartListingA.id}`, {
+      token: customerToken,
+      body: { quantity: 2 },
+    });
+    check("set quantity → 200", r.status === 200);
+    check("Cart Milk quantity is now exactly 2 (set, not added)", findItem(r.body, "Cart Milk")?.quantity === 2);
+    check("Cart Bread untouched (still 1)", findItem(r.body, "Cart Bread")?.quantity === 1);
+
+    // ============ Cart isolation: one customer can't touch another's ============
+    console.log("\nCart isolation (per-customer)");
+    // customer2 has no cart yet; they add Cart Bread x7 to THEIR OWN cart.
+    r = await req("POST", "/api/cart/items", {
+      token: customer2Token,
+      body: { listing: cartListingB.id, quantity: 7 },
+    });
+    check("customer2 builds their own cart → 201", r.status === 201);
+    check("customer2 cart has just their 1 item (qty 7)", r.body?.cart?.items?.length === 1 && findItem(r.body, "Cart Bread")?.quantity === 7);
+
+    // customer1's cart is completely unaffected by customer2's activity.
+    r = await req("GET", "/api/cart", { token: customerToken });
+    check("customer1 still sees their OWN 2 items", r.body?.cart?.items?.length === 2);
+    check("customer1's Cart Bread is still 1 (not customer2's 7)", findItem(r.body, "Cart Bread")?.quantity === 1);
+
+    // ============ Cart: DELETE /api/cart/items/:listingId ============
+    console.log("\nDELETE /api/cart/items/:listingId");
+
+    r = await req("DELETE", `/api/cart/items/${cartListingA.id}`);
+    check("no token → 401", r.status === 401);
+
+    r = await req("DELETE", "/api/cart/items/abc", { token: customerToken });
+    check("invalid listing id → 400", r.status === 400 && r.body.error === "Invalid listing id");
+
+    // Remove Cart Milk → only Cart Bread remains.
+    r = await req("DELETE", `/api/cart/items/${cartListingA.id}`, { token: customerToken });
+    check("remove one item → 200", r.status === 200);
+    check("Cart Milk gone, Cart Bread remains (1 item)", r.body?.cart?.items?.length === 1 && !!findItem(r.body, "Cart Bread"));
+
+    // Remove the same item again → idempotent, still 200, unchanged.
+    r = await req("DELETE", `/api/cart/items/${cartListingA.id}`, { token: customerToken });
+    check("removing an item that's already gone → 200 (idempotent)", r.status === 200 && r.body?.cart?.items?.length === 1);
+
+    // ================= Cart: DELETE /api/cart =================
+    console.log("\nDELETE /api/cart (clear)");
+
+    r = await req("DELETE", "/api/cart");
+    check("no token → 401", r.status === 401);
+
+    r = await req("DELETE", "/api/cart", { token: customerToken });
+    check("clear cart → 200 with empty items", r.status === 200 && Array.isArray(r.body?.cart?.items) && r.body.cart.items.length === 0);
+
+    r = await req("GET", "/api/cart", { token: customerToken });
+    check("GET after clear → still empty", r.body?.cart?.items?.length === 0);
+
+    // Clearing customer1's cart left customer2's cart untouched.
+    r = await req("GET", "/api/cart", { token: customer2Token });
+    check("customer2's cart is unaffected by customer1 clearing", r.body?.cart?.items?.length === 1 && findItem(r.body, "Cart Bread")?.quantity === 7);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

@@ -17,6 +17,17 @@ const addItemSchema = z.object({
     .optional(),
 });
 
+// A WHITELIST for SETTING an item's quantity (PATCH). Here `quantity` is REQUIRED
+// (a PATCH with nothing to set is pointless) and, unlike POST's optional add, it
+// replaces the value outright. The listing being changed comes from the URL, not
+// the body — so it's not in this schema.
+const setQuantitySchema = z.object({
+  quantity: z
+    .number()
+    .int("Quantity must be a whole number")
+    .min(1, "Quantity must be at least 1"),
+});
+
 // --- The shared populate helper -----------------------------------------
 // getPopulatedCart loads ONE customer's cart and swaps every stored id for the
 // live data the frontend needs to draw the cart. It is the ONE place that
@@ -126,8 +137,107 @@ async function addItem(req, res, next) {
   res.status(201).json({ cart: populated });
 }
 
+// A note on the route param for the next three handlers -------------------
+// PATCH and DELETE address an item by the LISTING id in the URL
+// (/api/cart/items/:listingId), NOT by a separate cart-item id. Why: cart items
+// are embedded subdocuments we created with `_id: false`, so they have no id of
+// their own — and a given listing appears at most ONCE in a cart, so the listing
+// id already identifies the line uniquely. The client also naturally knows the
+// listing id (it's what it added), so there's nothing extra to look up.
+
+// PATCH /api/cart/items/:listingId
+// Protected: a logged-in CUSTOMER only. SETS the quantity of one existing item to
+// a given value (contrast POST, which ADDS). If the item isn't in the cart → 404.
+async function setItemQuantity(req, res, next) {
+  // 1. Guard the listing id from the URL (else the .find comparison below is just
+  //    against junk, and it lets us give a clean 400 instead).
+  if (!mongoose.Types.ObjectId.isValid(req.params.listingId)) {
+    return next({ status: 400, message: "Invalid listing id" });
+  }
+
+  // 2. Validate the body → 400. quantity is required here.
+  const result = setQuantitySchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  // 3. Load the caller's own cart. No cart (or the item isn't in it) means there's
+  //    nothing to set → 404. You can't change the quantity of a line that isn't
+  //    there. (This is the one place a missing item is a 404 — see DELETE below,
+  //    which is idempotent instead.)
+  const cart = await Cart.findOne({ customer: req.user.id });
+  const item = cart
+    ? cart.items.find((i) => i.listing.toString() === req.params.listingId)
+    : null;
+  if (!item) {
+    return next({ status: 404, message: "Item not in cart" });
+  }
+
+  // 4. Set the new quantity outright and save.
+  item.quantity = data.quantity;
+  await cart.save();
+
+  // 5. Return the same populated shape as GET.
+  const populated = await getPopulatedCart(req.user.id);
+  res.json({ cart: populated });
+}
+
+// DELETE /api/cart/items/:listingId
+// Protected: a logged-in CUSTOMER only. Removes ONE item from the caller's cart.
+// Idempotent: removing something that's already gone (or from a customer with no
+// cart yet) is still a success (200) — DELETE should be safe to retry. So, unlike
+// PATCH, a "not there" item is NOT a 404 here.
+async function removeItem(req, res, next) {
+  // 1. Same listing-id guard → 400 on a malformed id.
+  if (!mongoose.Types.ObjectId.isValid(req.params.listingId)) {
+    return next({ status: 400, message: "Invalid listing id" });
+  }
+
+  // 2. Load the caller's cart. If they have none yet, there's nothing to remove —
+  //    return the empty cart shape (200), same as GET does for a cartless user.
+  const cart = await Cart.findOne({ customer: req.user.id });
+  if (!cart) {
+    return res.json({ cart: { items: [] } });
+  }
+
+  // 3. Keep every item EXCEPT the one whose listing matches. If nothing matched,
+  //    the array is simply unchanged — that's the idempotent case.
+  cart.items = cart.items.filter(
+    (i) => i.listing.toString() !== req.params.listingId
+  );
+  await cart.save();
+
+  // 4. Return the updated, populated cart.
+  const populated = await getPopulatedCart(req.user.id);
+  res.json({ cart: populated });
+}
+
+// DELETE /api/cart
+// Protected: a logged-in CUSTOMER only. Empties the WHOLE cart (items → []). Like
+// removeItem, this is safe to call even when there's no cart yet.
+async function clearCart(req, res, next) {
+  const cart = await Cart.findOne({ customer: req.user.id });
+
+  // No cart yet → nothing to empty; return the empty cart shape (200).
+  if (!cart) {
+    return res.json({ cart: { items: [] } });
+  }
+
+  // Drop every line and save. The populated result will simply have items: [].
+  cart.items = [];
+  await cart.save();
+
+  const populated = await getPopulatedCart(req.user.id);
+  res.json({ cart: populated });
+}
+
 module.exports = {
   getPopulatedCart,
   getCart,
   addItem,
+  setItemQuantity,
+  removeItem,
+  clearCart,
 };

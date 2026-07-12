@@ -89,9 +89,24 @@ are in **`docs/ROADMAP.md`**. Read it before starting a work session.
   from the actual reviews via aggregation — so edits/deletes stay correct and
   deleting the last review resets the shop to 0/0. This lights up Top Stores and
   seller ratings.
+- Step 8 — Cart (add to cart). Cart model: one per customer (`customer` unique),
+  with an EMBEDDED `items` array of `{ listing, quantity }` subdocuments — an item
+  references a Listing (not a bare product), so it knows the shop + price, and a
+  cart may mix items from several shops. We store only listing+quantity and NEVER
+  a price; every read goes through one shared `getPopulatedCart` helper that
+  nested-populates each item's live listing → product (name/nameAr/imageUrl/unit)
+  + shop (safe fields: name/area/phone), so the cart always shows CURRENT prices.
+  All routes are `auth` + `requireRole("customer")` and resolve the cart from
+  `req.user.id` (never a client id). `GET /api/cart` (no cart yet → empty cart,
+  200 not 404); `POST /api/cart/items` (get-or-create the cart; already-present
+  listing ADDS to its quantity, new listing pushes a line; bad/missing listing id
+  in the body → 400); `PATCH /api/cart/items/:listingId` SETS a quantity (not in
+  cart → 404); `DELETE /api/cart/items/:listingId` removes one (idempotent → 200);
+  `DELETE /api/cart` empties it. The route param is the LISTING id because items
+  have no id of their own and a listing appears at most once per cart.
 
-Next: Step 8 — Cart (one Cart per customer; `GET /api/cart`,
-`POST /api/cart/items` to add a listing, `PATCH /api/cart/items/:listingId` to
-change quantity, `DELETE /api/cart/items/:listingId` to remove). A cart item
-points to a Listing, so it already knows the shop and price. This is "add to
-cart".
+Next: Step 9 — Wishlist (one Wishlist per customer; `products: [→Product]`).
+`GET /api/wishlist`, `POST /api/wishlist/:productId` to save, and
+`DELETE /api/wishlist/:productId` to unsave. Unlike the cart, a wishlist saves a
+bare PRODUCT (not a listing) — it's "save this item to look at later," not "this
+shop's price." This is "save products".
