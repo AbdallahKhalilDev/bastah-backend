@@ -2,7 +2,7 @@ const express = require("express");
 const asyncHandler = require("../utils/asyncHandler");
 const auth = require("../middleware/auth");
 const requireRole = require("../middleware/requireRole");
-const { getCart } = require("../controllers/cart.controller");
+const { getCart, addItem } = require("../controllers/cart.controller");
 
 const router = express.Router();
 
@@ -17,5 +17,8 @@ const router = express.Router();
 
 // View my cart.
 router.get("/", auth, requireRole("customer"), asyncHandler(getCart));
+
+// Add a listing to my cart (or bump its quantity if it's already there).
+router.post("/items", auth, requireRole("customer"), asyncHandler(addItem));
 
 module.exports = router;

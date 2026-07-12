@@ -1,4 +1,21 @@
+const mongoose = require("mongoose");
+const { z } = require("zod");
 const Cart = require("../models/Cart");
+const Listing = require("../models/Listing");
+
+// --- Input validation ---------------------------------------------------
+// A WHITELIST for adding an item. Only these two keys are accepted; zod strips
+// anything else — notice the customer is NOT here (it comes from the login token,
+// never the body). `listing` is the id of the listing to add; `quantity` is
+// optional and, when omitted, falls back to 1 in the controller.
+const addItemSchema = z.object({
+  listing: z.string().min(1, "Listing is required"),
+  quantity: z
+    .number()
+    .int("Quantity must be a whole number")
+    .min(1, "Quantity must be at least 1")
+    .optional(),
+});
 
 // --- The shared populate helper -----------------------------------------
 // getPopulatedCart loads ONE customer's cart and swaps every stored id for the
@@ -49,7 +66,68 @@ async function getCart(req, res, next) {
   res.json({ cart });
 }
 
+// POST /api/cart/items
+// Protected: a logged-in CUSTOMER only. Adds a listing to the caller's cart. If
+// the listing is already in the cart, we ADD to its quantity (see the "already in
+// cart" note below); otherwise we push a new line. Creates the cart on first use.
+async function addItem(req, res, next) {
+  // 1. Validate the body against the whitelist FIRST. Bad shape → 400.
+  const result = addItemSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  // 2. The listing id came in the BODY (caller-supplied data), so we treat a bad
+  //    one as the CALLER's mistake → 400, exactly like createListing does with a
+  //    body-supplied product id. (Compare: an id in the URL PATH that matches
+  //    nothing is a 404 — the route points at nothing.) A malformed id would make
+  //    findById throw a CastError, so we guard it before touching the database.
+  if (!mongoose.Types.ObjectId.isValid(data.listing)) {
+    return next({ status: 400, message: "Invalid listing id" });
+  }
+  const listing = await Listing.findById(data.listing);
+  if (!listing) {
+    return next({ status: 400, message: "Listing not found" });
+  }
+
+  // 3. Get-or-create the caller's cart. A brand-new customer has no cart yet, so
+  //    the first time they add something we create it (resolved from the token,
+  //    never from the client).
+  let cart = await Cart.findOne({ customer: req.user.id });
+  if (!cart) {
+    cart = await Cart.create({ customer: req.user.id, items: [] });
+  }
+
+  // 4. Is this listing ALREADY in the cart? We detect it by matching on the
+  //    item's `listing` id (each stored as an ObjectId, so .toString() to compare
+  //    it to the string id from the body). A listing appears at most once per
+  //    cart, so at most one item can match.
+  const qtyToAdd = data.quantity ?? 1; // omitted quantity means "one, please"
+  const existing = cart.items.find(
+    (item) => item.listing.toString() === data.listing
+  );
+  if (existing) {
+    // ADD to the existing quantity (not overwrite). Rationale: pressing "add to
+    // cart" a second time means the shopper wants MORE. Setting an exact number
+    // is what PATCH is for — so POST adds, PATCH sets. This keeps the two
+    // endpoints' jobs clear and non-overlapping.
+    existing.quantity += qtyToAdd;
+  } else {
+    // New listing → push a fresh line.
+    cart.items.push({ listing: data.listing, quantity: qtyToAdd });
+  }
+  await cart.save();
+
+  // 5. Return the SAME populated shape as GET, via the shared helper — so the
+  //    client gets the updated cart with every item's live price/product/shop.
+  const populated = await getPopulatedCart(req.user.id);
+  res.status(201).json({ cart: populated });
+}
+
 module.exports = {
   getPopulatedCart,
   getCart,
+  addItem,
 };

@@ -722,6 +722,83 @@ async function main() {
     check("item's product populated (name/nameAr)", seedItem?.listing?.product?.name === "Cart Milk" && seedItem?.listing?.product?.nameAr === "حليب");
     check("item's shop populated with safe fields", seedItem?.listing?.shop?.name === "Shop A" && seedItem?.listing?.shop?.phone !== undefined);
     check("no owner leaked on the shop", seedItem?.listing?.shop?.owner === undefined);
+
+    // ================= Cart: POST /api/cart/items =================
+    console.log("\nPOST /api/cart/items");
+    // `customer` still has no cart (the GET above didn't create one). We build it
+    // up here. Helper to find a line by its product name in the returned cart.
+    const findItem = (body, name) =>
+      body?.cart?.items?.find((i) => i.listing?.product?.name === name);
+
+    r = await req("POST", "/api/cart/items", { body: { listing: cartListingA.id } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("POST", "/api/cart/items", {
+      token: sellerToken,
+      body: { listing: cartListingA.id },
+    });
+    check("non-customer (seller) → 403", r.status === 403);
+
+    r = await req("POST", "/api/cart/items", { token: customerToken, body: {} });
+    check("missing listing → 400", r.status === 400);
+
+    r = await req("POST", "/api/cart/items", {
+      token: customerToken,
+      body: { listing: "abc" },
+    });
+    check("invalid listing id → 400", r.status === 400 && r.body.error === "Invalid listing id");
+
+    r = await req("POST", "/api/cart/items", {
+      token: customerToken,
+      body: { listing: FAKE_ID },
+    });
+    check("listing not found → 400 (not a 500)", r.status === 400 && r.body.error === "Listing not found");
+
+    r = await req("POST", "/api/cart/items", {
+      token: customerToken,
+      body: { listing: cartListingA.id, quantity: 0 },
+    });
+    check("quantity 0 → 400", r.status === 400);
+
+    r = await req("POST", "/api/cart/items", {
+      token: customerToken,
+      body: { listing: cartListingA.id, quantity: 1.5 },
+    });
+    check("non-integer quantity → 400", r.status === 400);
+
+    // First add of listing A (no quantity → defaults to 1). Creates the cart.
+    r = await req("POST", "/api/cart/items", {
+      token: customerToken,
+      body: { listing: cartListingA.id },
+    });
+    check("add listing A → 201", r.status === 201);
+    check("cart now has 1 item", r.body?.cart?.items?.length === 1);
+    check("listing A quantity is 1", findItem(r.body, "Cart Milk")?.quantity === 1);
+    check("item shows live price (10)", findItem(r.body, "Cart Milk")?.listing?.price === 10);
+
+    // Add the SAME listing again with no quantity → quantity ADDS (1 → 2).
+    r = await req("POST", "/api/cart/items", {
+      token: customerToken,
+      body: { listing: cartListingA.id },
+    });
+    check("re-add same listing → still 1 item (no duplicate line)", r.body?.cart?.items?.length === 1);
+    check("quantity incremented to 2", findItem(r.body, "Cart Milk")?.quantity === 2);
+
+    // Add the same listing with quantity 3 → adds again (2 → 5).
+    r = await req("POST", "/api/cart/items", {
+      token: customerToken,
+      body: { listing: cartListingA.id, quantity: 3 },
+    });
+    check("adding quantity 3 → total 5", findItem(r.body, "Cart Milk")?.quantity === 5);
+
+    // Add listing B, which is in a DIFFERENT shop → both items coexist.
+    r = await req("POST", "/api/cart/items", {
+      token: customerToken,
+      body: { listing: cartListingB.id },
+    });
+    check("add listing from another shop → 2 items", r.body?.cart?.items?.length === 2);
+    check("both shops represented", findItem(r.body, "Cart Milk")?.listing?.shop?.name === "Shop A" && findItem(r.body, "Cart Bread")?.listing?.shop?.name === "Other Shop");
+    check("listing B shows its own live price (4)", findItem(r.body, "Cart Bread")?.listing?.price === 4);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
