@@ -12,6 +12,16 @@
 // controllers stay in charge of reading query params and shaping the JSON reply.
 
 const Product = require("../models/Product");
+const Shop = require("../models/Shop");
+
+// The ONLY shop fields safe to expose on a public Home-page card. This is an
+// INCLUSION projection: MongoDB returns exactly these keys (plus _id) and nothing
+// else. Crucially, `owner` is NOT listed, so it's never sent — and because the
+// owner's email/passwordHash live on the User that `owner` points at, leaving
+// owner out means those private details can't leak either. We include `category`
+// so it can be populated into a name for the card.
+const PUBLIC_SHOP_FIELDS =
+  "name area phone logoUrl category ratingAvg ratingCount isVerified createdAt";
 
 // The Home lists are short, capped lists (not full pagination). This turns a raw
 // ?limit into a trustworthy number: default to `def` when it's missing/garbage,
@@ -58,4 +68,29 @@ async function getFeaturedProducts({ limit }) {
   return getNewArrivals({ limit });
 }
 
-module.exports = { clampLimit, getNewArrivals, getFeaturedProducts };
+// Top stores = the best-rated ACTIVE shops for the Home page.
+//
+// The sort has TWO keys, and the order matters:
+//   1. ratingAvg  DESC — highest average rating first.
+//   2. ratingCount DESC — used only to break TIES on ratingAvg.
+// Why the tiebreaker? Rating alone treats a brand-new shop with a single 5★
+// review the same as a beloved shop with twenty 5★ reviews — both show 5.0. That
+// feels wrong on a "top stores" list, where trust matters. Breaking ties toward
+// the shop with MORE reviews puts the more-proven shop first. We also filter to
+// isActive: true (a hidden shop never appears) and use the safe public projection
+// above so no owner/email is ever returned.
+function getTopStores({ limit }) {
+  return Shop.find({ isActive: true })
+    .sort({ ratingAvg: -1, ratingCount: -1 })
+    .limit(limit)
+    .select(PUBLIC_SHOP_FIELDS)
+    .populate("category", "name nameAr");
+}
+
+module.exports = {
+  clampLimit,
+  getNewArrivals,
+  getFeaturedProducts,
+  getTopStores,
+  PUBLIC_SHOP_FIELDS,
+};

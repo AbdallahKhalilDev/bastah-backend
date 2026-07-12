@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { z } = require("zod");
 const Shop = require("../models/Shop");
 const Category = require("../models/Category");
+const homeQueries = require("../utils/homeQueries");
 
 // --- Input validation ---------------------------------------------------
 // zod describes exactly what a valid "create shop" body looks like. It is a
@@ -179,4 +180,16 @@ async function updateShop(req, res, next) {
   res.json({ shop });
 }
 
-module.exports = { listShops, getShop, createShop, updateShop };
+// GET /api/shops/top
+// Public. The Home page's "top stores" strip: the best-rated ACTIVE shops, capped
+// by ?limit (default 10). All the query logic (the two-key sort, the isActive
+// filter, and the safe public projection) lives in the shared helper so this
+// endpoint and the bundled /api/home can't disagree. We reply with just { shops }
+// — a small fixed list, not a paged one.
+async function getTopStores(req, res, next) {
+  const limit = homeQueries.clampLimit(req.query, 10);
+  const shops = await homeQueries.getTopStores({ limit });
+  res.json({ shops });
+}
+
+module.exports = { listShops, getShop, createShop, updateShop, getTopStores };

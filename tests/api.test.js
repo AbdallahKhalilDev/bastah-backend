@@ -977,6 +977,39 @@ async function main() {
     check("new: sorted newest-first by createdAt", naTimes.every((t, i) => i === 0 || naTimes[i - 1] >= t));
     check("new: most recently created product (featNew) is first", newArr[0]?._id === featNew.id);
     check("new: category populated name/nameAr only", !!newArr[0]?.category?.name && newArr[0]?.category?.slug === undefined);
+
+    // ============ Home (Step 10, Slice 2): top stores ============
+    console.log("\nGET /api/shops/top");
+
+    // Set each shop's denormalized rating DIRECTLY (updateOne bypasses the review
+    // recalc), so ordering is fully under our control regardless of what earlier
+    // review tests left behind. The interesting cases:
+    //   shopA  5.0 / 20  ┐ tie on ratingAvg — shopA wins on MORE reviews
+    //   shopB  5.0 /  1  ┘
+    //   otherShop 4.0 / 50  → lower avg, ranks last despite the most reviews
+    //   inactiveShop 5.0 / 999 → highest everything, but MUST be excluded (hidden)
+    await Shop.updateOne({ _id: shopA._id }, { ratingAvg: 5.0, ratingCount: 20 });
+    await Shop.updateOne({ _id: shopB._id }, { ratingAvg: 5.0, ratingCount: 1 });
+    await Shop.updateOne({ _id: otherShop._id }, { ratingAvg: 4.0, ratingCount: 50 });
+    await Shop.updateOne({ _id: inactiveShop._id }, { ratingAvg: 5.0, ratingCount: 999 });
+
+    r = await req("GET", "/api/shops/top?limit=50");
+    const top = r.body?.shops || [];
+    const topIds = top.map((s) => String(s._id));
+    check("top: 200 with a shops array", r.status === 200 && Array.isArray(top));
+    check("top: only the 3 ACTIVE shops (inactive excluded)", top.length === 3);
+    check("top: inactive shop excluded even with the highest rating", !topIds.includes(String(inactiveShop._id)));
+    check("top: highest ratingAvg first, tiebreaker by ratingCount (A, B, other)",
+      topIds[0] === String(shopA._id) && topIds[1] === String(shopB._id) && topIds[2] === String(otherShop._id));
+
+    // Safe public projection: no owner (and therefore no owner email) leaks.
+    const card = top[0];
+    check("top: safe fields present (name, phone, ratingAvg, ratingCount)",
+      card.name !== undefined && card.phone !== undefined && card.ratingAvg !== undefined && card.ratingCount !== undefined);
+    check("top: owner NOT leaked", card.owner === undefined);
+
+    r = await req("GET", "/api/shops/top?limit=2");
+    check("top: respects limit (2 → shopA, shopB)", (r.body?.shops || []).length === 2);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

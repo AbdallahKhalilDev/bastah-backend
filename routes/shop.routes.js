@@ -7,6 +7,7 @@ const {
   getShop,
   createShop,
   updateShop,
+  getTopStores,
 } = require("../controllers/shop.controller");
 const {
   createListing,
@@ -24,6 +25,10 @@ const router = express.Router();
 
 // Public reads (no auth).
 router.get("/", asyncHandler(listShops));
+// Home: top stores (best-rated active shops). This literal word MUST be
+// registered before "/:id", or Express would treat "top" as a shop id and try to
+// look it up (→ 400 "Invalid shop id"). Same route-order rule as /featured.
+router.get("/top", asyncHandler(getTopStores));
 router.get("/:id", asyncHandler(getShop));
 // A shop's product list (its listings, each with the product's details). Public,
 // like the other reads. Two-segment path, so it never clashes with GET /:id.
