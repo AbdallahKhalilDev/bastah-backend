@@ -1010,6 +1010,32 @@ async function main() {
 
     r = await req("GET", "/api/shops/top?limit=2");
     check("top: respects limit (2 → shopA, shopB)", (r.body?.shops || []).length === 2);
+
+    // ========= Home (Step 10, Slice 3): bundled GET /api/home =========
+    console.log("\nGET /api/home");
+
+    r = await req("GET", "/api/home");
+    const home = r.body || {};
+    check("home: 200", r.status === 200);
+    check("home: has featured/newArrivals/topStores arrays",
+      Array.isArray(home.featured) && Array.isArray(home.newArrivals) && Array.isArray(home.topStores));
+    check("home: all three lists non-empty (data exists)",
+      home.featured.length > 0 && home.newArrivals.length > 0 && home.topStores.length > 0);
+
+    // The bundle must MATCH the standalone endpoints (they share the same helpers,
+    // so their first item — the top of each deterministic sort — must be identical).
+    const rHomeNew = await req("GET", "/api/products/new?limit=8");
+    check("home.newArrivals matches /api/products/new (same first product)",
+      home.newArrivals[0]?._id === rHomeNew.body?.products?.[0]?._id);
+    const rHomeTop = await req("GET", "/api/shops/top?limit=8");
+    check("home.topStores matches /api/shops/top (same first shop)",
+      String(home.topStores[0]?._id) === String(rHomeTop.body?.shops?.[0]?._id));
+    const rHomeFeat = await req("GET", "/api/products/featured?limit=8");
+    check("home.featured matches /api/products/featured (same first product)",
+      home.featured[0]?._id === rHomeFeat.body?.products?.[0]?._id);
+
+    // topStores goes through the same safe projection here too — no owner leak.
+    check("home: topStores owner NOT leaked", home.topStores[0]?.owner === undefined);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

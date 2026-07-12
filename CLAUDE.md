@@ -111,14 +111,22 @@ scoped in `docs/ROADMAP.md`, but it's an isolated, non-core feature that nothing
 else depends on, so we prioritized Step 10 (the Home page, which is core to the
 project's first-two-pages scope) first. Step 10 has no dependency on Step 9.
 
-Now building: Step 10 — Home aggregation (composes existing data; no new models).
-Endpoints: `GET /api/products/featured` (isFeatured products, newest first, capped;
-falls back to newest if none flagged), `GET /api/products/new` (new arrivals,
-paginated), `GET /api/shops/top` (active shops by ratingAvg desc, then ratingCount
-desc), and a bundled `GET /api/home` returning `{ featured, newArrivals, topStores }`.
-Featuring is an admin-only editorial decision (like a shop's `isVerified`): added
-`isFeatured` (default false) to Product, set only via admin-only
-`PATCH /api/products/:id/feature` — a seller can never feature their own product.
+- Step 10 — Home aggregation DONE (composes existing data; no new models). Added
+  `isFeatured` (default false) to Product — an admin-only editorial flag (like a
+  shop's `isVerified`), set ONLY via admin-only `PATCH /api/products/:id/feature`
+  (explicit `{ isFeatured }` set, idempotent; a seller can never feature their own
+  product — it's kept out of the create whitelist). Public reads:
+  `GET /api/products/featured` (isFeatured, newest first, capped ?limit default 10;
+  IMPORTANT fallback → if none flagged yet, returns newest so the strip is never
+  blank), `GET /api/products/new` (new arrivals, full pagination), and
+  `GET /api/shops/top` (active shops by ratingAvg desc, tiebreak ratingCount desc,
+  safe public fields only — no owner/email). One bundled `GET /api/home` returns
+  `{ featured, newArrivals, topStores }` in a single request. The ONE canonical
+  query for each strip lives in `utils/homeQueries.js` (shared by the standalone
+  endpoints AND /api/home, so they can't drift); `getFeaturedProducts` /
+  `getNewArrivals` / `getTopStores` + a `clampLimit` helper + a `PUBLIC_SHOP_FIELDS`
+  projection constant. Route-order note: `/featured` & `/new` are registered before
+  `/:id` in product routes, and `/top` before `/:id` in shop routes.
 
 Next after Step 10: circle back to Step 9 — Wishlist (one Wishlist per customer;
 `products: [→Product]`). `GET /api/wishlist`, `POST /api/wishlist/:productId` to
