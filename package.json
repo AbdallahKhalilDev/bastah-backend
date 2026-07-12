@@ -9,6 +9,7 @@
     "test": "node tests/api.test.js",
     "seed:categories": "node seed/categories.seed.js",
     "seed:products": "node seed/products.seed.js",
+    "seed:listings": "node seed/listings.seed.js",
     "set-role": "node scripts/setRole.js"
   },
   "dependencies": {

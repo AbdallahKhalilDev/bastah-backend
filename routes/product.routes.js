@@ -7,6 +7,7 @@ const {
   listProducts,
   getProduct,
 } = require("../controllers/product.controller");
+const { listProductListings } = require("../controllers/listing.controller");
 
 const router = express.Router();
 
@@ -21,6 +22,9 @@ const router = express.Router();
 // Public reads (no auth).
 router.get("/", asyncHandler(listProducts)); // browse, paginated
 router.get("/:id", asyncHandler(getProduct)); // one product's details
+// Price comparison: every shop's price for one product, cheapest first. Two
+// segments (/:id/listings), so it never clashes with the one-segment /:id above.
+router.get("/:id/listings", asyncHandler(listProductListings));
 
 // Create a product. Middleware runs left-to-right BEFORE the controller:
 //   auth                       → verifies the token, sets req.user (else 401)

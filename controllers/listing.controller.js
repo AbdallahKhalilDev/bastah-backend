@@ -212,9 +212,70 @@ async function listShopProducts(req, res, next) {
   res.json({ listings });
 }
 
+// GET /api/products/:id/listings
+// Public. THE headline feature: given one product, return every shop's price for
+// it, CHEAPEST FIRST. This is the mirror of listShopProducts — that one fixes a
+// shop and lists its products; this one fixes a product and lists the shops
+// selling it, so a shopper can compare prices at a glance.
+async function listProductListings(req, res, next) {
+  // 1. Guard the id, then confirm the product exists (so we can 404 clearly and
+  //    include the product's own details in the response).
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid product id" });
+  }
+  const product = await Product.findById(req.params.id);
+  if (!product) {
+    return next({ status: 404, message: "Product not found" });
+  }
+
+  // 2. Find every listing for this product, sorted by price ascending (cheapest
+  //    first) AT THE DATABASE LEVEL, and pull in each listing's shop — but only
+  //    the safe public fields. We also grab isActive purely so we can filter on
+  //    it next; it never goes into the response. The shop OWNER is never even
+  //    loaded, so there's no way to leak their email/credentials.
+  const listings = await Listing.find({ product: req.params.id })
+    .sort({ price: 1 })
+    .populate("shop", "name area phone ratingAvg ratingCount isActive");
+
+  // 3. Keep only listings whose shop is still active (hide prices from
+  //    deactivated shops), and — importantly — a listing whose shop was deleted
+  //    populates as null, so `l.shop &&` drops those too. Filtering preserves the
+  //    cheapest-first order the DB already gave us. Then reshape each listing to
+  //    expose exactly the safe fields (no isActive, no owner).
+  const activeListings = listings
+    .filter((l) => l.shop && l.shop.isActive)
+    .map((l) => ({
+      _id: l._id,
+      price: l.price,
+      inStock: l.inStock,
+      shop: {
+        _id: l.shop._id,
+        name: l.shop.name,
+        area: l.shop.area,
+        phone: l.shop.phone,
+        ratingAvg: l.shop.ratingAvg,
+        ratingCount: l.shop.ratingCount,
+      },
+    }));
+
+  // 4. Respond with the product summary + the cheapest-first listings. No shop
+  //    lists it (or all lister-shops are inactive) → listings: [] with 200.
+  res.json({
+    product: {
+      _id: product._id,
+      name: product.name,
+      nameAr: product.nameAr,
+      imageUrl: product.imageUrl,
+      unit: product.unit,
+    },
+    listings: activeListings,
+  });
+}
+
 module.exports = {
   createListing,
   updateListing,
   deleteListing,
   listShopProducts,
+  listProductListings,
 };

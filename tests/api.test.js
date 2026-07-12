@@ -379,6 +379,36 @@ async function main() {
 
     r = await req("GET", `/api/products/${FAKE_ID}`);
     check("missing product → 404", r.status === 404);
+
+    // ============ Comparison: GET /api/products/:id/listings ============
+    console.log("\nGET /api/products/:id/listings (price comparison)");
+
+    // List ONE product in three shops: active @5, active @3, and INACTIVE @1.
+    // Expected: only the two active shops appear, ordered 3 then 5 — and the
+    // inactive shop's cheaper price (1) must NOT sneak in.
+    const cmpProduct = await Product.create({ name: "Compare Oil", nameAr: "زيت مقارنة", category: category._id });
+    await Listing.create({ shop: shopA._id, product: cmpProduct._id, price: 5 });
+    await Listing.create({ shop: shopB._id, product: cmpProduct._id, price: 3 });
+    await Listing.create({ shop: inactiveShop._id, product: cmpProduct._id, price: 1 });
+
+    r = await req("GET", `/api/products/${cmpProduct.id}/listings`);
+    check("→ 200", r.status === 200);
+    check("product summary included", r.body?.product?.name === "Compare Oil");
+    check("only active shops' listings (2 of 3)", r.body?.listings?.length === 2);
+    check("sorted cheapest first (3 then 5)", r.body?.listings?.[0]?.price === 3 && r.body?.listings?.[1]?.price === 5);
+    check("inactive shop's cheaper price (1) excluded", !r.body.listings.some((l) => l.price === 1));
+    check("shop carries safe public fields", !!r.body.listings[0]?.shop?.name && r.body.listings[0]?.shop?.phone !== undefined);
+    check("no owner/isActive leaked on shop", r.body.listings[0]?.shop?.owner === undefined && r.body.listings[0]?.shop?.isActive === undefined);
+
+    const lonelyProduct = await Product.create({ name: "Lonely Product", nameAr: "منتج وحيد", category: category._id });
+    r = await req("GET", `/api/products/${lonelyProduct.id}/listings`);
+    check("product nobody lists → 200 with []", r.status === 200 && Array.isArray(r.body.listings) && r.body.listings.length === 0);
+
+    r = await req("GET", "/api/products/abc/listings");
+    check("invalid id → 400", r.status === 400 && r.body.error === "Invalid product id");
+
+    r = await req("GET", `/api/products/${FAKE_ID}/listings`);
+    check("missing product → 404", r.status === 404);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
