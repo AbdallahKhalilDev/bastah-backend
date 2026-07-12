@@ -8,6 +8,7 @@ const {
   createShop,
   updateShop,
 } = require("../controllers/shop.controller");
+const { createListing } = require("../controllers/listing.controller");
 
 const router = express.Router();
 
@@ -32,6 +33,19 @@ router.patch(
   auth,
   requireRole("seller", "admin"),
   asyncHandler(updateShop)
+);
+
+// Add a listing (a price for a product) to THIS shop. The URL lives under a
+// shop, so the route lives here, but the logic is listing logic and lives in
+// listing.controller. Same auth + role gate as creating a shop; the per-shop
+// ownership rule (a seller may add only to their OWN shop) is enforced inside
+// the controller. This two-segment path (/:shopId/listings) never collides with
+// the one-segment GET /:id above.
+router.post(
+  "/:shopId/listings",
+  auth,
+  requireRole("seller", "admin"),
+  asyncHandler(createListing)
 );
 
 module.exports = router;
