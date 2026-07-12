@@ -16,7 +16,8 @@
       "Bash(node -e \"require\\('dotenv'\\).config\\(\\); require\\('./app'\\); console.log\\('OK: app + login route load cleanly'\\);\")",
       "Bash(node -e \"require\\('dotenv'\\).config\\(\\); const a=require\\('./middleware/auth'\\); const r=require\\('./middleware/requireRole'\\); console.log\\('OK: auth =', typeof a, '| requireRole =', typeof r, '| requireRole\\(\\) =', typeof r\\('admin'\\)\\);\")",
       "Bash(node -e \"const C = require\\('./models/Category'\\); console.log\\('Category model loaded OK. Collection:', C.collection.name\\);\")",
-      "Bash(node -e \"const app = require\\('./app'\\); const routes = app._router.stack.filter\\(l => l.name === 'router'\\).length; console.log\\('app.js built OK — mounted routers:', routes\\);\")"
+      "Bash(node -e \"const app = require\\('./app'\\); const routes = app._router.stack.filter\\(l => l.name === 'router'\\).length; console.log\\('app.js built OK — mounted routers:', routes\\);\")",
+      "Bash(node -e \"require\\('./models/Shop.js'\\); console.log\\('Shop model loaded OK'\\);\")"
     ]
   }
 }
