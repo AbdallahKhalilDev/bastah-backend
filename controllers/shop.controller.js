@@ -21,6 +21,22 @@ const createShopSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
+// The "update shop" body uses the SAME whitelist as create, but EVERY field is
+// optional — a PATCH changes only the fields you send and leaves the rest alone.
+// name/phone are still min(1) *when present*, so you can't blank them out. As
+// with create, unknown keys (owner, isVerified, ratingAvg, ratingCount) are
+// stripped, so this endpoint can never change the system-controlled fields.
+const updateShopSchema = z.object({
+  name: z.string().min(1, "Name cannot be empty").optional(),
+  phone: z.string().min(1, "Phone cannot be empty").optional(),
+  area: z.string().optional(),
+  address: z.string().optional(),
+  description: z.string().optional(),
+  logoUrl: z.string().optional(),
+  category: z.string().optional(),
+  isActive: z.boolean().optional(),
+});
+
 // GET /api/shops
 // Public. Returns every ACTIVE shop, sorted by name.
 async function listShops(req, res, next) {
@@ -105,4 +121,62 @@ async function createShop(req, res, next) {
   res.status(201).json({ shop });
 }
 
-module.exports = { listShops, getShop, createShop };
+// PATCH /api/shops/:id
+// Protected: a logged-in seller or admin (auth + requireRole run first). A
+// seller may edit ONLY their own shop; an admin may edit ANY shop.
+async function updateShop(req, res, next) {
+  // 1. Guard the id (else findById would throw a CastError on junk like "abc").
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid shop id" });
+  }
+
+  // 2. Load the shop. A well-formed id that matches nothing is a 404.
+  //    (Unlike the public reads, we do NOT hide inactive shops here — an owner
+  //    must be able to find and re-activate a shop they've deactivated.)
+  const shop = await Shop.findById(req.params.id);
+  if (!shop) {
+    return next({ status: 404, message: "Shop not found" });
+  }
+
+  // 3. Ownership check. Admins skip it. For a seller, the shop's owner id must
+  //    equal their own id (owner is an ObjectId, so .toString() to compare it
+  //    to the string id from the token). If not, 403 — they're logged in, but
+  //    it isn't their shop.
+  if (
+    req.user.role !== "admin" &&
+    shop.owner.toString() !== req.user.id
+  ) {
+    return next({ status: 403, message: "Forbidden" });
+  }
+
+  // 4. Validate the body against the update whitelist.
+  const result = updateShopSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  // 5. If they're changing the category, verify the new one exists (same check
+  //    as create). Omitting category leaves the current one untouched.
+  if (data.category) {
+    if (!mongoose.Types.ObjectId.isValid(data.category)) {
+      return next({ status: 400, message: "Invalid category id" });
+    }
+    const category = await Category.findById(data.category);
+    if (!category) {
+      return next({ status: 400, message: "Category not found" });
+    }
+  }
+
+  // 6. Copy the validated fields onto the loaded document, then save. save()
+  //    runs the schema's validators and updates the `updatedAt` timestamp.
+  //    Because `data` only ever contains whitelisted keys, there's no way for a
+  //    forbidden field to slip in here.
+  Object.assign(shop, data);
+  await shop.save();
+
+  res.json({ shop });
+}
+
+module.exports = { listShops, getShop, createShop, updateShop };
