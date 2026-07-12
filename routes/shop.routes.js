@@ -12,6 +12,7 @@ const {
   createListing,
   listShopProducts,
 } = require("../controllers/listing.controller");
+const { createReview } = require("../controllers/review.controller");
 
 const router = express.Router();
 
@@ -52,6 +53,18 @@ router.post(
   auth,
   requireRole("seller", "admin"),
   asyncHandler(createListing)
+);
+
+// Leave a review for THIS shop. Like listings, the URL lives under a shop, so the
+// route lives here, but the logic is review logic in review.controller. Only a
+// logged-in CUSTOMER may post (auth → requireRole("customer")); the author is
+// taken from the token inside the controller. This two-segment path
+// (/:shopId/reviews) never collides with the one-segment GET /:id above.
+router.post(
+  "/:shopId/reviews",
+  auth,
+  requireRole("customer"),
+  asyncHandler(createReview)
 );
 
 module.exports = router;

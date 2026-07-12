@@ -75,7 +75,8 @@ async function main() {
   // before we test that a duplicate listing is rejected with 409.
   const Listing = require("../models/Listing");
   const Product = require("../models/Product");
-  await Promise.all([Listing.init(), Product.init(), Shop.init()]);
+  const Review = require("../models/Review");
+  await Promise.all([Listing.init(), Product.init(), Shop.init(), Review.init()]);
 
   // --- seed data ---
   const category = await Category.create({
@@ -108,6 +109,12 @@ async function main() {
     passwordHash: "x",
     role: "customer",
   });
+  const customer2 = await User.create({
+    name: "Second Customer",
+    email: "customer2@test.com",
+    passwordHash: "x",
+    role: "customer",
+  });
 
   const shopA = await Shop.create({ owner: seller._id, name: "Shop A", phone: "1" });
   const shopB = await Shop.create({ owner: seller._id, name: "Shop B", phone: "2" });
@@ -126,6 +133,7 @@ async function main() {
   const sellerToken = tokenFor(seller);
   const adminToken = tokenFor(admin);
   const customerToken = tokenFor(customer);
+  const customer2Token = tokenFor(customer2);
 
   // Start the real app on a random free port.
   const server = await new Promise((resolve) => {
@@ -460,6 +468,86 @@ async function main() {
     // (if /:id had captured it, "search" would be an invalid id → 400).
     r = await req("GET", "/api/products/search");
     check("/search resolves to search, not /:id", r.status === 200 && Array.isArray(r.body?.products));
+
+    // ============ Reviews: POST /api/shops/:shopId/reviews ============
+    console.log("\nPOST /api/shops/:shopId/reviews");
+
+    r = await req("POST", `/api/shops/${shopA.id}/reviews`, { body: { rating: 5 } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("POST", `/api/shops/${shopA.id}/reviews`, {
+      token: sellerToken,
+      body: { rating: 5 },
+    });
+    check("non-customer (seller) → 403", r.status === 403);
+
+    r = await req("POST", "/api/shops/abc/reviews", {
+      token: customerToken,
+      body: { rating: 5 },
+    });
+    check("invalid shop id → 400", r.status === 400 && r.body.error === "Invalid shop id");
+
+    r = await req("POST", `/api/shops/${FAKE_ID}/reviews`, {
+      token: customerToken,
+      body: { rating: 5 },
+    });
+    check("shop not found → 404", r.status === 404);
+
+    r = await req("POST", `/api/shops/${inactiveShop.id}/reviews`, {
+      token: customerToken,
+      body: { rating: 5 },
+    });
+    check("inactive shop is hidden → 404", r.status === 404);
+
+    r = await req("POST", `/api/shops/${shopA.id}/reviews`, {
+      token: customerToken,
+      body: { rating: 6 },
+    });
+    check("rating above 5 → 400", r.status === 400);
+
+    r = await req("POST", `/api/shops/${shopA.id}/reviews`, {
+      token: customerToken,
+      body: { rating: 3.5 },
+    });
+    check("non-integer rating → 400", r.status === 400);
+
+    r = await req("POST", `/api/shops/${shopA.id}/reviews`, {
+      token: customerToken,
+      body: { comment: "no stars" },
+    });
+    check("missing rating → 400", r.status === 400);
+
+    // Customer 1 posts a valid 5-star review on shop A.
+    r = await req("POST", `/api/shops/${shopA.id}/reviews`, {
+      token: customerToken,
+      body: { rating: 5, comment: "Great shop" },
+    });
+    check("customer posts review → 201", r.status === 201);
+    check("returns the review with rating 5", r.body?.review?.rating === 5);
+
+    // Shop A's cached rating should now reflect that one review.
+    r = await req("GET", `/api/shops/${shopA.id}`);
+    check("shop ratingCount is now 1", r.body?.shop?.ratingCount === 1);
+    check("shop ratingAvg is now 5", r.body?.shop?.ratingAvg === 5);
+
+    // Same customer, same shop, again → blocked by the unique index.
+    r = await req("POST", `/api/shops/${shopA.id}/reviews`, {
+      token: customerToken,
+      body: { rating: 4 },
+    });
+    check("same customer reviews same shop again → 409", r.status === 409);
+
+    // A DIFFERENT customer reviews the same shop with 2 stars.
+    r = await req("POST", `/api/shops/${shopA.id}/reviews`, {
+      token: customer2Token,
+      body: { rating: 2 },
+    });
+    check("second customer's review → 201", r.status === 201);
+
+    // Average of 5 and 2 is 3.5, across 2 reviews.
+    r = await req("GET", `/api/shops/${shopA.id}`);
+    check("two reviews → ratingCount 2", r.body?.shop?.ratingCount === 2);
+    check("two reviews (5,2) → ratingAvg 3.5", r.body?.shop?.ratingAvg === 3.5);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
