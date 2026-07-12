@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "seed:categories": "node seed/categories.seed.js"
+    "seed:categories": "node seed/categories.seed.js",
+    "set-role": "node scripts/setRole.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
