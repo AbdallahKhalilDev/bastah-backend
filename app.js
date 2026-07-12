@@ -5,6 +5,7 @@ const categoryRoutes = require("./routes/category.routes");
 const shopRoutes = require("./routes/shop.routes");
 const productRoutes = require("./routes/product.routes");
 const listingRoutes = require("./routes/listing.routes");
+const reviewRoutes = require("./routes/review.routes");
 const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
@@ -17,6 +18,7 @@ app.use("/api/categories", categoryRoutes);
 app.use("/api/shops", shopRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/listings", listingRoutes);
+app.use("/api/reviews", reviewRoutes);
 
 app.use((req, res, next) => {
   next({ status: 404, message: "Route not found" });

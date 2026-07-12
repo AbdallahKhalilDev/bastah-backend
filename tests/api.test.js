@@ -524,6 +524,7 @@ async function main() {
     });
     check("customer posts review → 201", r.status === 201);
     check("returns the review with rating 5", r.body?.review?.rating === 5);
+    const review1Id = r.body?.review?._id; // customer 1's review, used in Slice 4
 
     // Shop A's cached rating should now reflect that one review.
     r = await req("GET", `/api/shops/${shopA.id}`);
@@ -543,6 +544,7 @@ async function main() {
       body: { rating: 2 },
     });
     check("second customer's review → 201", r.status === 201);
+    const review2Id = r.body?.review?._id; // customer 2's review, used in Slice 4
 
     // Average of 5 and 2 is 3.5, across 2 reviews.
     r = await req("GET", `/api/shops/${shopA.id}`);
@@ -575,6 +577,78 @@ async function main() {
 
     r = await req("GET", `/api/shops/${FAKE_ID}/reviews`);
     check("shop not found → 404", r.status === 404);
+
+    // ============ Reviews: PATCH /api/reviews/:id ============
+    console.log("\nPATCH /api/reviews/:id");
+    // State here: shop A has review1 (customer1, rating 5) + review2 (customer2,
+    // rating 2); ratingAvg 3.5, ratingCount 2.
+
+    r = await req("PATCH", `/api/reviews/${review1Id}`, { body: { rating: 3 } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("PATCH", "/api/reviews/abc", { token: customerToken, body: { rating: 3 } });
+    check("invalid review id → 400", r.status === 400 && r.body.error === "Invalid review id");
+
+    r = await req("PATCH", `/api/reviews/${FAKE_ID}`, { token: customerToken, body: { rating: 3 } });
+    check("review not found → 404", r.status === 404);
+
+    r = await req("PATCH", `/api/reviews/${review1Id}`, {
+      token: customer2Token,
+      body: { rating: 1 },
+    });
+    check("editing someone else's review → 403", r.status === 403);
+
+    r = await req("PATCH", `/api/reviews/${review1Id}`, {
+      token: customerToken,
+      body: { rating: 9 },
+    });
+    check("rating out of range → 400", r.status === 400);
+
+    // Author lowers their own rating from 5 to 3.
+    r = await req("PATCH", `/api/reviews/${review1Id}`, {
+      token: customerToken,
+      body: { rating: 3 },
+    });
+    check("author edits own review → 200", r.status === 200);
+    check("rating updated to 3", r.body?.review?.rating === 3);
+
+    // Shop average must re-sync: (3 + 2) / 2 = 2.5.
+    r = await req("GET", `/api/shops/${shopA.id}`);
+    check("edit re-syncs shop average to 2.5", r.body?.shop?.ratingAvg === 2.5);
+    check("ratingCount still 2 after edit", r.body?.shop?.ratingCount === 2);
+
+    // ============ Reviews: DELETE /api/reviews/:id ============
+    console.log("\nDELETE /api/reviews/:id");
+
+    r = await req("DELETE", `/api/reviews/${review2Id}`);
+    check("no token → 401", r.status === 401);
+
+    r = await req("DELETE", "/api/reviews/abc", { token: customerToken });
+    check("invalid review id → 400", r.status === 400);
+
+    r = await req("DELETE", `/api/reviews/${FAKE_ID}`, { token: customerToken });
+    check("review not found → 404", r.status === 404);
+
+    r = await req("DELETE", `/api/reviews/${review1Id}`, { token: customer2Token });
+    check("deleting someone else's review (not admin) → 403", r.status === 403);
+
+    // customer2 deletes their OWN review (rating 2). Shop A now has only review1
+    // (rating 3): average 3, count 1.
+    r = await req("DELETE", `/api/reviews/${review2Id}`, { token: customer2Token });
+    check("author deletes own review → 200", r.status === 200);
+
+    r = await req("GET", `/api/shops/${shopA.id}`);
+    check("delete re-syncs: ratingCount 1", r.body?.shop?.ratingCount === 1);
+    check("delete re-syncs: ratingAvg 3", r.body?.shop?.ratingAvg === 3);
+
+    // An ADMIN deletes review1 (customer1's) — the LAST review on shop A.
+    r = await req("DELETE", `/api/reviews/${review1Id}`, { token: adminToken });
+    check("admin deletes another user's review → 200", r.status === 200);
+
+    // Removing the last review returns the shop cleanly to 0 / 0.
+    r = await req("GET", `/api/shops/${shopA.id}`);
+    check("last review gone → ratingCount 0", r.body?.shop?.ratingCount === 0);
+    check("last review gone → ratingAvg 0", r.body?.shop?.ratingAvg === 0);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

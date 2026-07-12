@@ -19,6 +19,21 @@ const createReviewSchema = z.object({
   comment: z.string().optional(),
 });
 
+// A WHITELIST for UPDATING a review. Same two fields, but BOTH optional — a PATCH
+// changes only what you send. Notice what's NOT here: `author` and `shop`. zod
+// strips them, so even if a client sends them we ignore them — a review can never
+// be repointed at a different author or shop (same reasoning as the locked
+// shop/product on a Listing update).
+const updateReviewSchema = z.object({
+  rating: z
+    .number()
+    .int("Rating must be a whole number")
+    .min(1, "Rating must be at least 1")
+    .max(5, "Rating must be at most 5")
+    .optional(),
+  comment: z.string().optional(),
+});
+
 // --- The shared rating helper -------------------------------------------
 // recalcShopRating recomputes a shop's cached ratingAvg/ratingCount FROM the
 // actual reviews and saves the result onto the shop. It is the ONE place the
@@ -151,4 +166,89 @@ async function listShopReviews(req, res, next) {
   res.json({ reviews, page, limit, total });
 }
 
-module.exports = { recalcShopRating, createReview, listShopReviews };
+// PATCH /api/reviews/:id
+// Protected (auth). Only the review's OWN author may edit it, and only the rating
+// and comment can change. After saving, we recompute the shop's rating with the
+// same helper Slice 2 uses.
+async function updateReview(req, res, next) {
+  // 1. Guard the id from the URL (else findById throws a CastError on junk).
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid review id" });
+  }
+
+  // 2. Load the review. A well-formed id matching nothing is a 404.
+  const review = await Review.findById(req.params.id);
+  if (!review) {
+    return next({ status: 404, message: "Review not found" });
+  }
+
+  // 3. Ownership: only the author may edit their own review. (No admin override
+  //    on EDIT — an admin shouldn't rewrite someone's opinion; deleting abuse is
+  //    a separate power, handled below.) author is an ObjectId, so .toString() to
+  //    compare it to the string id from the token.
+  if (review.author.toString() !== req.user.id) {
+    return next({ status: 403, message: "Forbidden" });
+  }
+
+  // 4. Validate the body against the update whitelist. shop/author aren't in it,
+  //    so they can't be changed here.
+  const result = updateReviewSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  // 5. Copy the validated fields onto the document and save. save() runs the
+  //    schema validators and refreshes updatedAt.
+  Object.assign(review, data);
+  await review.save();
+
+  // 6. The rating may have changed, so recompute the shop's cached rating from
+  //    ALL its reviews — the SAME helper as Slice 2, so the math lives in one
+  //    place and can't drift.
+  await recalcShopRating(review.shop);
+
+  res.json({ review });
+}
+
+// DELETE /api/reviews/:id
+// Protected (auth). The author may delete their own review; an ADMIN may delete
+// anyone's (to remove abuse). After deleting, we re-sync the shop's rating.
+async function deleteReview(req, res, next) {
+  // 1. Same id guard → 400.
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid review id" });
+  }
+
+  // 2. Load the review → 404 if it's not there.
+  const review = await Review.findById(req.params.id);
+  if (!review) {
+    return next({ status: 404, message: "Review not found" });
+  }
+
+  // 3. Ownership: allowed if you're an admin OR you're the author. Otherwise 403.
+  if (req.user.role !== "admin" && review.author.toString() !== req.user.id) {
+    return next({ status: 403, message: "Forbidden" });
+  }
+
+  // 4. Remember which shop this review belonged to BEFORE we delete it — we still
+  //    need that id to recompute the shop's rating afterwards.
+  const shopId = review.shop;
+  await review.deleteOne();
+
+  // 5. Re-sync the shop's rating from whatever reviews remain. If this was the
+  //    LAST review, the aggregation returns nothing and recalcShopRating resets
+  //    the shop to ratingCount 0 / ratingAvg 0 — exactly what we want.
+  await recalcShopRating(shopId);
+
+  res.json({ message: "Review deleted" });
+}
+
+module.exports = {
+  recalcShopRating,
+  createReview,
+  listShopReviews,
+  updateReview,
+  deleteReview,
+};

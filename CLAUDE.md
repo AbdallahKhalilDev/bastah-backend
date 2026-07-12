@@ -79,8 +79,19 @@ are in **`docs/ROADMAP.md`**. Read it before starting a work session.
   name/nameAr, `?category`, `?sort=newest|name`, paginated). Added
   `utils/pagination.js` and two idempotent seeds: `npm run seed:products` (24 demo
   products) and `npm run seed:listings` (4 demo shops + listings).
+- Step 7 — Reviews + shop rating sync. Review model targeting shops, with a unique
+  `(author, shop)` index (one review per customer per shop; duplicate → 409).
+  Customer-only `POST /api/shops/:shopId/reviews`; public paginated
+  `GET /api/shops/:shopId/reviews` (author NAME only — no credentials leaked);
+  `PATCH /api/reviews/:id` (author only) and `DELETE /api/reviews/:id` (author or
+  admin). Every write funnels through ONE shared `recalcShopRating(shopId)` helper
+  that recomputes the shop's `ratingAvg` (rounded to 1 decimal) / `ratingCount`
+  from the actual reviews via aggregation — so edits/deletes stay correct and
+  deleting the last review resets the shop to 0/0. This lights up Top Stores and
+  seller ratings.
 
-Next: Step 7 — Reviews (Review model targeting shops; public
-`GET /api/shops/:id/reviews`; `POST /api/shops/:id/reviews` for logged-in
-customers; keep the shop's denormalized `ratingAvg`/`ratingCount` updated on each
-new review — this lights up Top Stores and seller ratings).
+Next: Step 8 — Cart (one Cart per customer; `GET /api/cart`,
+`POST /api/cart/items` to add a listing, `PATCH /api/cart/items/:listingId` to
+change quantity, `DELETE /api/cart/items/:listingId` to remove). A cart item
+points to a Listing, so it already knows the shop and price. This is "add to
+cart".
