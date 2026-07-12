@@ -343,6 +343,42 @@ async function main() {
 
     r = await req("GET", `/api/shops/${inactiveShop.id}/products`);
     check("inactive shop is hidden → 404", r.status === 404);
+
+    // ================= Browse: GET /api/products =================
+    console.log("\nGET /api/products (browse, paginated)");
+
+    // So far only "Sugar" exists. Add 4 more directly so we have 5 products to
+    // page through with known totals.
+    for (const n of ["Rice", "Salt", "Flour", "Tea"]) {
+      await Product.create({ name: n, nameAr: n, category: category._id });
+    }
+
+    r = await req("GET", "/api/products?limit=2");
+    check("limit=2 → 2 products", Array.isArray(r.body?.products) && r.body.products.length === 2);
+    check("echoes page=1, limit=2", r.body?.page === 1 && r.body?.limit === 2);
+    check("total counts ALL products (5)", r.body?.total === 5);
+    check(
+      "category populated with name/nameAr only (no slug)",
+      !!r.body.products[0]?.category?.name && r.body.products[0]?.category?.slug === undefined
+    );
+
+    r = await req("GET", "/api/products?page=3&limit=2");
+    check("page 3 of limit 2 → 1 leftover product", r.body?.products?.length === 1 && r.body?.page === 3);
+
+    r = await req("GET", "/api/products?limit=999");
+    check("limit clamped to 50 (all 5 returned)", r.body?.limit === 50 && r.body?.products?.length === 5);
+
+    // ================= Details: GET /api/products/:id =================
+    console.log("\nGET /api/products/:id");
+
+    r = await req("GET", `/api/products/${productId}`);
+    check("valid id → 200 with category populated", r.status === 200 && r.body?.product?.category?.name === "Grocery");
+
+    r = await req("GET", "/api/products/abc");
+    check("invalid id → 400", r.status === 400 && r.body.error === "Invalid product id");
+
+    r = await req("GET", `/api/products/${FAKE_ID}`);
+    check("missing product → 404", r.status === 404);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

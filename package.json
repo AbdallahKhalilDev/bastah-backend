@@ -8,6 +8,7 @@
     "dev": "nodemon server.js",
     "test": "node tests/api.test.js",
     "seed:categories": "node seed/categories.seed.js",
+    "seed:products": "node seed/products.seed.js",
     "set-role": "node scripts/setRole.js"
   },
   "dependencies": {

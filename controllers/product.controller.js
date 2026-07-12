@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { z } = require("zod");
 const Product = require("../models/Product");
 const Category = require("../models/Category");
+const parsePagination = require("../utils/pagination");
 
 // --- Input validation ---------------------------------------------------
 // zod describes exactly what a valid "create product" body looks like. It is a
@@ -57,4 +58,49 @@ async function createProduct(req, res, next) {
   res.status(201).json({ product });
 }
 
-module.exports = { createProduct };
+// GET /api/products
+// Public. Returns the catalog, newest first, in PAGES. A catalog can grow to
+// thousands of items, so we never send them all at once — the caller asks for a
+// "page" of a given "limit" size, and we also tell them the grand `total` so a
+// frontend can show "page 1 of N".
+async function listProducts(req, res, next) {
+  // Turn ?page / ?limit into trustworthy numbers (+ the skip offset).
+  const { page, limit, skip } = parsePagination(req.query);
+
+  // countDocuments is a separate, cheap query that returns HOW MANY products
+  // match — here, all of them. It's the total across every page, not just this
+  // one, so the frontend knows how many pages exist.
+  const total = await Product.countDocuments({});
+
+  // The actual page: sort newest-first, jump over `skip` docs, take `limit`.
+  // populate swaps each category id for just its name/nameAr (nothing else).
+  const products = await Product.find({})
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .populate("category", "name nameAr");
+
+  res.json({ products, page, limit, total });
+}
+
+// GET /api/products/:id
+// Public. Returns a single product by its id, with its category populated.
+async function getProduct(req, res, next) {
+  // 1. Guard the id FIRST (else findById throws a CastError on junk like "abc").
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid product id" });
+  }
+
+  // 2. Look it up. A well-formed id matching nothing → 404.
+  const product = await Product.findById(req.params.id).populate(
+    "category",
+    "name nameAr"
+  );
+  if (!product) {
+    return next({ status: 404, message: "Product not found" });
+  }
+
+  res.json({ product });
+}
+
+module.exports = { createProduct, listProducts, getProduct };
