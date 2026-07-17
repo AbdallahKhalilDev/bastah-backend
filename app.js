@@ -1,4 +1,5 @@
 const express = require("express");
+const cors = require("cors");
 const healthRoutes = require("./routes/health.routes");
 const authRoutes = require("./routes/auth.routes");
 const categoryRoutes = require("./routes/category.routes");
@@ -11,6 +12,10 @@ const homeRoutes = require("./routes/home.routes");
 const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
+
+// Allow all origins for now so any frontend can call the API during development.
+// TODO: restrict `origin` to the real frontend URL before/at production launch.
+app.use(cors({ origin: true }));
 
 app.use(express.json());
 

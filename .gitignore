@@ -4,3 +4,5 @@ node_modules/
 # Claude Code local/runtime files
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+CLAUDE.md
+docs/
