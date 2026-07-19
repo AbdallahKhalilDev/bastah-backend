@@ -17,11 +17,16 @@
 // regex matches substrings as the user types, while a text index only matches
 // whole words. A text index is a future scaling optimization, not part of this.
 //
-// Built in slices: this file starts with PRODUCTS (Slice 1); searchShops and
-// searchCategories are added in Slices 2 and 3.
+// Built in slices: PRODUCTS (Slice 1) + SHOPS (Slice 2); searchCategories is
+// added in Slice 3.
 
 const Product = require("../models/Product");
+const Shop = require("../models/Shop");
 const escapeRegex = require("./escapeRegex");
+// Reuse the SAME safe public shop projection the Home page uses — one source of
+// truth for "which shop fields are safe to expose" (notably: never `owner`, so
+// the owner's email/passwordHash can't leak through search results).
+const { PUBLIC_SHOP_FIELDS } = require("./homeQueries");
 
 // How many of each group the bundled dropdown returns. Small on purpose — the
 // dropdown shows a taste of each type, with a "See all N" link for the rest.
@@ -54,7 +59,35 @@ async function searchProducts({ q, limit, skip = 0 }) {
   return { items, total };
 }
 
+// Shops — a shop has NO Arabic name, so we match its name, its area (neighbour-
+// hood), and its description blurb. Only ACTIVE shops are searchable (a hidden
+// shop never appears), mirroring Top Stores and the shop directory. Sorted by
+// rating (best-rated match first, ties broken by more reviews — the same order
+// as Top Stores), and projected through PUBLIC_SHOP_FIELDS so no owner leaks.
+// Note: `description` is matched by the DB filter but isn't in the public
+// projection, so we can FIND a shop by its description without exposing it.
+async function searchShops({ q, limit, skip = 0 }) {
+  const rx = toRegex(q);
+  if (!rx) return { items: [], total: 0 };
+
+  const filter = {
+    isActive: true,
+    $or: [{ name: rx }, { area: rx }, { description: rx }],
+  };
+  const [items, total] = await Promise.all([
+    Shop.find(filter)
+      .sort({ ratingAvg: -1, ratingCount: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select(PUBLIC_SHOP_FIELDS)
+      .populate("category", "name nameAr"),
+    Shop.countDocuments(filter),
+  ]);
+  return { items, total };
+}
+
 module.exports = {
   DROPDOWN_LIMIT,
   searchProducts,
+  searchShops,
 };

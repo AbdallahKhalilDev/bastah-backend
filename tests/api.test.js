@@ -1105,6 +1105,31 @@ async function main() {
     // A regex metacharacter must be treated literally, never crash the server.
     r = await req("GET", "/api/search?q=" + encodeURIComponent("("));
     check("q='(' does not crash (regex escaped) → 200", r.status === 200);
+
+    // ============ Global Search (Slice 2): shops in the bundle ============
+    console.log("\nGET /api/search (Slice 2: shops)");
+
+    // Four shops that all match the token "Zqshop" — but via DIFFERENT fields, to
+    // prove a shop is found by name OR area OR description. The 4th is INACTIVE and
+    // must be excluded even though its name matches. (Description is matched by the
+    // filter but isn't in the public projection, so it won't be echoed back.)
+    await Shop.create({ owner: seller._id, name: "Zqshop Market", phone: "9" });
+    await Shop.create({ owner: seller._id, name: "Plain Store", phone: "9", area: "Zqshop District" });
+    await Shop.create({ owner: seller._id, name: "Another Store", phone: "9", description: "the best Zqshop deals in town" });
+    await Shop.create({ owner: seller._id, name: "Zqshop Hidden", phone: "9", isActive: false });
+
+    r = await req("GET", "/api/search?q=Zqshop");
+    check("bundle now includes a shops[] array", r.status === 200 && Array.isArray(r.body?.shops));
+    const shopNames = (r.body?.shops || []).map((s) => s.name);
+    check("shop matched by NAME is found (Zqshop Market)", shopNames.includes("Zqshop Market"));
+    check("shop matched by AREA is found (Plain Store)", shopNames.includes("Plain Store"));
+    check("shop matched by DESCRIPTION is found (Another Store)", shopNames.includes("Another Store"));
+    check("counts.shops = 3 active matches (inactive excluded)", r.body?.counts?.shops === 3);
+    check("inactive shop excluded despite matching name", !shopNames.includes("Zqshop Hidden"));
+    check("shop carries safe public fields (name, phone, area)",
+      r.body.shops[0]?.name !== undefined && r.body.shops[0]?.phone !== undefined);
+    check("shop owner NOT leaked", r.body.shops.every((s) => s.owner === undefined));
+    check("shop isActive NOT leaked (internal flag)", r.body.shops.every((s) => s.isActive === undefined));
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
