@@ -1172,6 +1172,54 @@ async function main() {
         typeof r.body?.counts?.shops === "number" &&
         typeof r.body?.counts?.categories === "number"
     );
+
+    // ============ Global Search (Slice 4): ?type= "see all" paginated ============
+    console.log("\nGET /api/search?type=… (Slice 4: see-all pagination)");
+
+    // We seeded 6 "Zzsearch" products back in Slice 1 — perfect for paging.
+    r = await req("GET", "/api/search?q=Zzsearch&type=products&limit=2");
+    check(
+      "type=products → { query, type, results, page, limit, total }",
+      r.status === 200 &&
+        r.body?.type === "products" &&
+        Array.isArray(r.body?.results) &&
+        r.body?.page === 1 &&
+        r.body?.limit === 2 &&
+        typeof r.body?.total === "number"
+    );
+    check("see-all page 1 (limit 2) → 2 results", r.body?.results?.length === 2);
+    check("total counts ALL matches, not just the page (6)", r.body?.total === 6);
+
+    r = await req("GET", "/api/search?q=Zzsearch&type=products&page=3&limit=2");
+    check("see-all page 3 of limit 2 → the final 2 of 6", r.body?.results?.length === 2 && r.body?.page === 3);
+
+    // The "see all" page is NOT capped at the dropdown's 5 — it pages the full set.
+    r = await req("GET", "/api/search?q=Zzsearch&type=products&limit=50");
+    check("see-all returns beyond the dropdown cap of 5 (all 6)", r.body?.results?.length === 6);
+
+    // Shops/categories see-all obey the same safe rules as the bundle.
+    r = await req("GET", "/api/search?q=Zqshop&type=shops&limit=50");
+    check(
+      "type=shops → only active matches (3), owner never leaked",
+      r.body?.total === 3 && r.body.results.every((s) => s.owner === undefined)
+    );
+
+    r = await req("GET", "/api/search?q=Zqcat&type=categories");
+    check("type=categories → the 1 active name match", r.body?.type === "categories" && r.body?.total === 1);
+
+    // Unknown type → 400 (a caller mistake, not a silent fallback to the bundle).
+    r = await req("GET", "/api/search?q=x&type=bogus");
+    check("unknown type → 400 Invalid search type", r.status === 400 && r.body?.error === "Invalid search type");
+
+    // Empty q in see-all mode → empty results + total 0, still 200.
+    r = await req("GET", "/api/search?type=products&q=");
+    check(
+      "empty q in see-all → 200, empty results, total 0",
+      r.status === 200 &&
+        Array.isArray(r.body?.results) &&
+        r.body.results.length === 0 &&
+        r.body?.total === 0
+    );
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
