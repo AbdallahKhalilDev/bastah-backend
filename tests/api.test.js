@@ -1130,6 +1130,48 @@ async function main() {
       r.body.shops[0]?.name !== undefined && r.body.shops[0]?.phone !== undefined);
     check("shop owner NOT leaked", r.body.shops.every((s) => s.owner === undefined));
     check("shop isActive NOT leaked (internal flag)", r.body.shops.every((s) => s.isActive === undefined));
+
+    // ============ Global Search (Slice 3): categories in the bundle ============
+    console.log("\nGET /api/search (Slice 3: categories)");
+
+    // A category matched by NAME ("Zqcat"), one matched only by its Arabic nameAr,
+    // and an INACTIVE one that must be excluded even though its name matches.
+    // (Slugs are unique, so each gets its own.)
+    await Category.create({ name: "Zqcat Supplies", nameAr: "لوازم", slug: "zqcat-supplies" });
+    await Category.create({ name: "Plain Category", nameAr: "زقكاتفريد", slug: "plain-cat-zq" });
+    await Category.create({ name: "Zqcat Hidden", nameAr: "مخفي", slug: "zqcat-hidden", isActive: false });
+
+    r = await req("GET", "/api/search?q=Zqcat");
+    check("bundle now includes a categories[] array", r.status === 200 && Array.isArray(r.body?.categories));
+    const catNames = (r.body?.categories || []).map((c) => c.name);
+    check("category matched by NAME is found (Zqcat Supplies)", catNames.includes("Zqcat Supplies"));
+    check("counts.categories = 1 active name match", r.body?.counts?.categories === 1);
+    check("inactive category excluded despite matching name", !catNames.includes("Zqcat Hidden"));
+
+    // Match on the ARABIC name only — the token isn't in the English name.
+    r = await req("GET", "/api/search?q=" + encodeURIComponent("زقكاتفريد"));
+    check(
+      "q=زقكاتفريد finds the category via nameAr",
+      (r.body?.categories || []).some((c) => c.name === "Plain Category")
+    );
+    check("counts.categories for the nameAr-only match is 1", r.body?.counts?.categories === 1);
+
+    // Full bundle sanity: a query that hits ALL THREE types at once returns all
+    // three populated. "Zq" is the shared prefix of our shop + category test tokens
+    // (Zqshop / Zqcat); "Zzsearch" products don't match "Zq", so we add a product
+    // that does, to prove one query can light up every group.
+    await Product.create({ name: "Zqproduct Sample", nameAr: "عينة", category: category._id });
+    r = await req("GET", "/api/search?q=Zq");
+    check(
+      "one query fills products + shops + categories together",
+      r.body?.products?.length > 0 && r.body?.shops?.length > 0 && r.body?.categories?.length > 0
+    );
+    check(
+      "counts present for all three groups",
+      typeof r.body?.counts?.products === "number" &&
+        typeof r.body?.counts?.shops === "number" &&
+        typeof r.body?.counts?.categories === "number"
+    );
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

@@ -17,11 +17,11 @@
 // regex matches substrings as the user types, while a text index only matches
 // whole words. A text index is a future scaling optimization, not part of this.
 //
-// Built in slices: PRODUCTS (Slice 1) + SHOPS (Slice 2); searchCategories is
-// added in Slice 3.
+// Built in slices: PRODUCTS (Slice 1) + SHOPS (Slice 2) + CATEGORIES (Slice 3).
 
 const Product = require("../models/Product");
 const Shop = require("../models/Shop");
+const Category = require("../models/Category");
 const escapeRegex = require("./escapeRegex");
 // Reuse the SAME safe public shop projection the Home page uses — one source of
 // truth for "which shop fields are safe to expose" (notably: never `owner`, so
@@ -86,8 +86,23 @@ async function searchShops({ q, limit, skip = 0 }) {
   return { items, total };
 }
 
+// Categories — bilingual name/nameAr, active only (a hidden category never
+// appears), sorted A→Z for a predictable dropdown.
+async function searchCategories({ q, limit, skip = 0 }) {
+  const rx = toRegex(q);
+  if (!rx) return { items: [], total: 0 };
+
+  const filter = { isActive: true, $or: [{ name: rx }, { nameAr: rx }] };
+  const [items, total] = await Promise.all([
+    Category.find(filter).sort({ name: 1 }).skip(skip).limit(limit),
+    Category.countDocuments(filter),
+  ]);
+  return { items, total };
+}
+
 module.exports = {
   DROPDOWN_LIMIT,
   searchProducts,
   searchShops,
+  searchCategories,
 };
