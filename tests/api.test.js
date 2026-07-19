@@ -1036,6 +1036,75 @@ async function main() {
 
     // topStores goes through the same safe projection here too — no owner leak.
     check("home: topStores owner NOT leaked", home.topStores[0]?.owner === undefined);
+
+    // ============ Global Search (Slice 1): GET /api/search — products ============
+    console.log("\nGET /api/search (Slice 1: products)");
+
+    // Seed 6 products sharing a distinctive token so we can prove the dropdown
+    // CAPS each group at 5 while `counts` still reports the TRUE total (6). The
+    // token is deliberately weird so nothing else in the catalog matches it.
+    for (let i = 1; i <= 6; i++) {
+      await Product.create({
+        name: `Zzsearch Item ${i}`,
+        nameAr: `منتج بحث ${i}`,
+        category: category._id,
+      });
+    }
+    // A product whose distinctive term lives ONLY in nameAr (its English name has
+    // no such token) — proves Arabic matching works, not just English.
+    await Product.create({
+      name: "Arabic Only Match",
+      nameAr: "بحثفريد",
+      category: category._id,
+    });
+
+    r = await req("GET", "/api/search?q=Zzsearch");
+    check(
+      "bundle shape: query + products[] + counts{}",
+      r.status === 200 &&
+        typeof r.body?.query === "string" &&
+        Array.isArray(r.body?.products) &&
+        typeof r.body?.counts === "object"
+    );
+    check("products capped at DROPDOWN_LIMIT (5 of 6)", r.body?.products?.length === 5);
+    check("counts.products reports the TRUE total (6)", r.body?.counts?.products === 6);
+    check(
+      "every returned product actually matches the query",
+      r.body.products.every((p) => /zzsearch/i.test(p.name) || /zzsearch/i.test(p.nameAr))
+    );
+    check(
+      "results carry category populated (name/nameAr only, no slug)",
+      !!r.body.products[0]?.category?.name && r.body.products[0]?.category?.slug === undefined
+    );
+
+    // Case-insensitive PARTIAL match on the English name (finds "Sugar").
+    r = await req("GET", "/api/search?q=sug");
+    check(
+      "q=sug finds Sugar by name (partial, case-insensitive)",
+      r.status === 200 && r.body.products.some((p) => p.name === "Sugar")
+    );
+
+    // Match on the ARABIC name only — the term isn't in the English name.
+    r = await req("GET", "/api/search?q=" + encodeURIComponent("بحثفريد"));
+    check(
+      "q=بحثفريد finds the product via nameAr",
+      r.status === 200 && r.body.products.some((p) => p.name === "Arabic Only Match")
+    );
+    check("counts.products for the nameAr-only match is 1", r.body?.counts?.products === 1);
+
+    // Empty query → nothing to search: empty group + zero count, still 200 (not 400).
+    r = await req("GET", "/api/search?q=");
+    check(
+      "empty q → 200 with empty products and count 0",
+      r.status === 200 &&
+        Array.isArray(r.body?.products) &&
+        r.body.products.length === 0 &&
+        r.body?.counts?.products === 0
+    );
+
+    // A regex metacharacter must be treated literally, never crash the server.
+    r = await req("GET", "/api/search?q=" + encodeURIComponent("("));
+    check("q='(' does not crash (regex escaped) → 200", r.status === 200);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

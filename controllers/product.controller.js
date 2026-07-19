@@ -4,6 +4,7 @@ const Product = require("../models/Product");
 const Category = require("../models/Category");
 const parsePagination = require("../utils/pagination");
 const homeQueries = require("../utils/homeQueries");
+const escapeRegex = require("../utils/escapeRegex");
 
 // --- Input validation ---------------------------------------------------
 // zod describes exactly what a valid "create product" body looks like. It is a
@@ -111,14 +112,6 @@ async function getProduct(req, res, next) {
   }
 
   res.json({ product });
-}
-
-// Escapes regex special characters in user input so we can safely build a regex
-// from it. Without this, a search for "(" would be an INVALID regex and throw a
-// 500 — and a crafted input could make the regex do surprising things. This
-// turns every special char (. * + ? ( ) [ ] etc.) into a plain literal.
-function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // GET /api/products/search

@@ -9,6 +9,7 @@ const listingRoutes = require("./routes/listing.routes");
 const reviewRoutes = require("./routes/review.routes");
 const cartRoutes = require("./routes/cart.routes");
 const homeRoutes = require("./routes/home.routes");
+const searchRoutes = require("./routes/search.routes");
 const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
@@ -28,6 +29,7 @@ app.use("/api/listings", listingRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/home", homeRoutes);
+app.use("/api/search", searchRoutes);
 
 app.use((req, res, next) => {
   next({ status: 404, message: "Route not found" });

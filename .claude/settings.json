@@ -20,7 +20,8 @@
       "Bash(node -e \"require\\('./models/Shop.js'\\); console.log\\('Shop model loaded OK'\\);\")",
       "PowerShell(node \"C:\\\\Users\\\\3bood\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-3bood-repos-bastah-backend\\\\aeb66e8b-6a19-4952-b47e-488d9795b6bf\\\\scratchpad\\\\repro.js\")",
       "Bash(npm test *)",
-      "PowerShell(npm install cors)"
+      "PowerShell(npm install cors)",
+      "PowerShell(npm test)"
     ]
   }
 }
