@@ -1489,6 +1489,187 @@ async function main() {
     r = await req("GET", `/api/orders/${shopAOrderId}`, { token: orderCustomerToken });
     check("the order STILL shows priceAtOrder 10", r.body?.order?.items?.[0]?.priceAtOrder === 10);
     check("the order's subtotal is unchanged (30)", r.body?.order?.subtotal === 30);
+
+    // ============ Orders: GET /api/orders/incoming (seller inbox) ============
+    console.log("\nGET /api/orders/incoming");
+    // State of play: orderCustomer has 3 orders — two at shopA (owned by
+    // `seller`) and one at otherShop (owned by `otherSeller`). All still pending.
+    const otherShopOrderId = otherShopOrder?._id;
+
+    r = await req("GET", "/api/orders/incoming");
+    check("no token → 401", r.status === 401);
+
+    r = await req("GET", "/api/orders/incoming", { token: orderCustomerToken });
+    check("a customer → 403", r.status === 403);
+
+    // ROUTE ORDER PROOF: if /:id were registered first, Express would read
+    // "incoming" as an order id and answer 400 "Invalid order id".
+    r = await req("GET", "/api/orders/incoming", { token: sellerToken });
+    check("/incoming is NOT swallowed by /:id → 200", r.status === 200);
+    check("paginated shape { orders, page, limit, total }", Array.isArray(r.body?.orders) && r.body?.page === 1 && r.body?.total === 2);
+    check("seller sees BOTH of their shopA orders", r.body?.orders?.every((o) => o.shop?.name === "Shop A"));
+    check("seller never sees another shop's order", !r.body?.orders?.some((o) => o._id === otherShopOrderId));
+
+    // A seller may own several shops, so the inbox spans all of them — and
+    // stops exactly at the shops they own.
+    r = await req("GET", "/api/orders/incoming", { token: tokenFor(otherSeller) });
+    check("the OTHER seller sees only their own 1 order", r.body?.total === 1 && r.body?.orders?.[0]?._id === otherShopOrderId);
+
+    r = await req("GET", "/api/orders/incoming", { token: adminToken });
+    check("an admin sees every order in the marketplace (3)", r.body?.total === 3);
+
+    // $in: [] matches nothing, so this needs no special case in the controller.
+    const shoplessSeller = await User.create({
+      name: "Shopless Seller",
+      email: "shopless@test.com",
+      passwordHash: "x",
+      role: "seller",
+    });
+    r = await req("GET", "/api/orders/incoming", { token: tokenFor(shoplessSeller) });
+    check("a seller with no shops → empty page, 200 (not an error)", r.status === 200 && r.body?.total === 0);
+
+    r = await req("GET", "/api/orders/incoming?status=banana", { token: sellerToken });
+    check("unknown ?status → 400 Invalid status", r.status === 400 && r.body?.error === "Invalid status");
+
+    // ============ Orders: PATCH /api/orders/:id/status ============
+    console.log("\nPATCH /api/orders/:id/status");
+
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, { body: { status: "accepted" } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("PATCH", "/api/orders/abc/status", {
+      token: sellerToken,
+      body: { status: "accepted" },
+    });
+    check("invalid order id → 400", r.status === 400 && r.body?.error === "Invalid order id");
+
+    r = await req("PATCH", `/api/orders/${FAKE_ID}/status`, {
+      token: sellerToken,
+      body: { status: "accepted" },
+    });
+    check("unknown order → 404", r.status === 404 && r.body?.error === "Order not found");
+
+    // A stranger is refused BEFORE the body is even looked at, so they learn
+    // nothing about the order.
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: customer2Token,
+      body: { status: "accepted" },
+    });
+    check("a stranger → 403", r.status === 403 && r.body?.error === "Forbidden");
+
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "banana" },
+    });
+    check("not a real status → 400 Invalid status", r.status === 400 && r.body?.error === "Invalid status");
+
+    // 403 vs 409, the distinction that matters:
+    // the move EXISTS but not for a customer → 403.
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: orderCustomerToken,
+      body: { status: "accepted" },
+    });
+    check("customer tries to ACCEPT their own order → 403 (not their move)", r.status === 403);
+
+    // the move doesn't exist from here FOR ANYONE → 409.
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "completed" },
+    });
+    check("pending → completed skips a step → 409", r.status === 409 && r.body?.error === "Cannot change a pending order to completed");
+
+    // --- the happy path: the seller walks one order all the way through ---
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "accepted" },
+    });
+    check("seller: pending → accepted → 200", r.status === 200 && r.body?.order?.status === "accepted");
+
+    // Now that it's accepted, the customer has lost the right to cancel — the
+    // shop may already have set stock aside.
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: orderCustomerToken,
+      body: { status: "cancelled" },
+    });
+    check("customer can NOT cancel an accepted order → 403", r.status === 403);
+
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "ready" },
+    });
+    check("seller: accepted → ready → 200", r.status === 200 && r.body?.order?.status === "ready");
+
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "completed" },
+    });
+    check("seller: ready → completed → 200", r.status === 200 && r.body?.order?.status === "completed");
+
+    // Terminal means terminal — for everybody.
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "pending" },
+    });
+    check("completed is terminal → 409", r.status === 409 && r.body?.error === "Cannot change a completed order to pending");
+
+    r = await req("PATCH", `/api/orders/${shopAOrderId}/status`, {
+      token: adminToken,
+      body: { status: "ready" },
+    });
+    check("not even an admin can un-complete an order → 409", r.status === 409);
+
+    // --- cancellation ---
+    // A customer MAY cancel while it's still just a request.
+    r = await req("PATCH", `/api/orders/${otherShopOrderId}/status`, {
+      token: orderCustomerToken,
+      body: { status: "cancelled", cancelReason: "changed my mind" },
+    });
+    check("customer cancels their own PENDING order → 200", r.status === 200 && r.body?.order?.status === "cancelled");
+    check("cancelReason is stored", r.body?.order?.cancelReason === "changed my mind");
+
+    r = await req("PATCH", `/api/orders/${otherShopOrderId}/status`, {
+      token: tokenFor(otherSeller),
+      body: { status: "accepted" },
+    });
+    check("cancelled is terminal too → 409", r.status === 409);
+
+    // A seller may cancel from any non-terminal state.
+    r = await req("PATCH", `/api/orders/${secondCheckoutOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "cancelled", cancelReason: "sold out" },
+    });
+    check("seller cancels a pending order → 200", r.status === 200 && r.body?.order?.status === "cancelled");
+
+    // cancelReason is ignored when the move isn't a cancellation, so it can't
+    // linger misleadingly on a live order. Every order above is terminal by now,
+    // so place a fresh one to move.
+    await addToCart(orderCustomerToken, orderListingB.id, 1);
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599" },
+    });
+    const freshOrderId = r.body?.orders?.[0]?._id;
+    check("placed a fresh pending order to test against", r.status === 201 && !!freshOrderId);
+
+    r = await req("PATCH", `/api/orders/${freshOrderId}/status`, {
+      token: adminToken,
+      body: { status: "accepted", cancelReason: "should be ignored" },
+    });
+    check("cancelReason ignored on a non-cancel move", r.status === 200 && r.body?.order?.status === "accepted" && r.body?.order?.cancelReason === undefined);
+
+    // An admin may make any move a seller may — but only those.
+    r = await req("PATCH", `/api/orders/${freshOrderId}/status`, {
+      token: adminToken,
+      body: { status: "ready" },
+    });
+    check("admin can drive a shop's order forward → 200", r.status === 200 && r.body?.order?.status === "ready");
+
+    // The status filters now have something real to filter.
+    r = await req("GET", "/api/orders?status=completed", { token: orderCustomerToken });
+    check("my orders ?status=completed → the 1 we completed", r.body?.total === 1);
+
+    r = await req("GET", "/api/orders/incoming?status=cancelled", { token: sellerToken });
+    check("inbox ?status=cancelled → the 1 the seller cancelled", r.body?.total === 1);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

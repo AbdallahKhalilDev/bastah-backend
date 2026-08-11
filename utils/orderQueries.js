@@ -24,6 +24,81 @@ const ORDER_STATUSES = [
   "cancelled",
 ];
 
+// --- THE STATE MACHINE ----------------------------------------------------
+// An order can't jump anywhere it likes. It walks a path:
+//
+//   pending → accepted → ready → completed
+//      ↘         ↘         ↘
+//            cancelled
+//
+// `ready` means "the shop has the goods packed and set aside" — i.e. come and
+// collect them. `completed` means "THE CUSTOMER HAS THE GOODS". It does NOT
+// mean "paid": no money moves through this app. `completed` and `cancelled` are
+// TERMINAL — nothing leaves them, for anybody, including an admin.
+//
+// Read the table as: from THIS status you may move to THESE statuses, and each
+// move is allowed only to THESE actors. A status missing from a row is not
+// reachable from it; an empty row ({}) is a dead end.
+//
+// Keeping it as DATA rather than a pile of if-statements means the whole rule
+// book is one thing you can read top to bottom — and adding a status later
+// (Step 13 adds "delivering") is a new row, not new branching logic scattered
+// across the controller.
+//
+// IMPORTANT: `actorRole` here is NOT req.user.role. It's the caller's role
+// RELATIVE TO THIS ORDER — see resolveActorRole below. That distinction is what
+// lets one small table express "the customer who placed it" vs "the seller who
+// owns the shop" without the table knowing anything about users.
+const TRANSITIONS = {
+  pending: {
+    accepted: ["seller", "admin"],
+    // A customer may withdraw while it's still just a request — nothing has
+    // been done yet, so nobody loses anything.
+    cancelled: ["customer", "seller", "admin"],
+  },
+  accepted: {
+    ready: ["seller", "admin"],
+    // NOTE the customer is NOT here. Once the shop has accepted, they may have
+    // set stock aside or started preparing. In a marketplace whose only
+    // currency is trust, letting a customer silently vaporise real work is the
+    // wrong default — after this point they phone the shop (which is the whole
+    // premise of the app) and the SELLER cancels.
+    cancelled: ["seller", "admin"],
+  },
+  ready: {
+    completed: ["seller", "admin"],
+    // The goods are packed with the customer's name on them. Only the shop can
+    // call it off now (a no-show, say).
+    cancelled: ["seller", "admin"],
+  },
+  // Terminal. Nobody un-completes or un-cancels an order.
+  completed: {},
+  cancelled: {},
+};
+
+// Can this move happen, and may THIS person make it?
+//
+// Returns one of three plain strings. It knows NOTHING about HTTP — the
+// controller turns the answer into a status code, the same way
+// utils/pagination.js returns numbers and lets the controller decide.
+//
+//   "ok"        → make the move
+//   "illegal"   → this move doesn't exist FOR ANYONE  → controller sends 409
+//   "forbidden" → the move exists, but not for YOU    → controller sends 403
+//
+// Why 409 and not 400 for an illegal move? The request body was perfectly
+// valid — it's the CURRENT STATE of the order that conflicts with it. That's
+// the same shape of problem as a duplicate key (which we already answer with
+// 409). It also gives the frontend an actionable distinction: a 409 means
+// "refresh, someone else moved this on", a 403 means "this button shouldn't be
+// here for you".
+function canTransition({ from, to, actorRole }) {
+  const allowed = TRANSITIONS[from];
+  if (!allowed || !allowed[to]) return "illegal";
+  if (!allowed[to].includes(actorRole)) return "forbidden";
+  return "ok";
+}
+
 // --- The shared populate --------------------------------------------------
 // ONE description of what a "readable order" looks like, used by the
 // single-order read AND the list endpoints, so they can't drift.
@@ -121,6 +196,8 @@ function money(n) {
 
 module.exports = {
   ORDER_STATUSES,
+  TRANSITIONS,
+  canTransition,
   ORDER_POPULATE,
   getPopulatedOrder,
   findOrders,

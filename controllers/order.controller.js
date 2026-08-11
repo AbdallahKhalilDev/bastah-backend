@@ -11,6 +11,7 @@ const parsePagination = require("../utils/pagination");
 const { getPopulatedCart } = require("./cart.controller");
 const {
   ORDER_STATUSES,
+  canTransition,
   getPopulatedOrder,
   findOrders,
   resolveActorRole,
@@ -30,6 +31,18 @@ const {
 const createOrderSchema = z.object({
   contactPhone: z.string().min(1, "Contact phone is required"),
   note: z.string().optional(),
+});
+
+// A WHITELIST for moving an order along. `status` is the status you want to move
+// it TO — z.enum rejects anything that isn't a real status before we ever look
+// at the order, so the transition table only ever sees sensible values.
+//
+// `cancelReason` is only meaningful alongside a cancellation, and the controller
+// ignores it otherwise. Note what's absent again: you cannot edit an order's
+// items, prices or totals through here (or anywhere else) — an order is history.
+const updateStatusSchema = z.object({
+  status: z.enum(ORDER_STATUSES, { error: "Invalid status" }),
+  cancelReason: z.string().optional(),
 });
 
 // POST /api/orders
@@ -261,8 +274,116 @@ async function getOrder(req, res, next) {
   res.json({ order });
 }
 
+// GET /api/orders/incoming
+// Protected: a logged-in SELLER or ADMIN. The seller's inbox — every order
+// placed at any shop they own, newest first, paginated.
+//
+// This is the first query in Bastah shaped "everything belonging to ANY of my
+// things", because Shop.owner has no `unique`: one seller may own several shops.
+// So it's two steps — find my shop ids, then one query filtered by them.
+async function listIncomingOrders(req, res, next) {
+  const { page, limit, skip } = parsePagination(req.query);
+
+  let filter;
+  if (req.user.role === "admin") {
+    // An admin oversees the whole marketplace, so their inbox is every order.
+    filter = {};
+  } else {
+    // Ask only for the ids — we don't need the whole shop documents, just
+    // something to filter orders by.
+    const myShops = await Shop.find({ owner: req.user.id }).select("_id");
+    const myShopIds = myShops.map((s) => s._id);
+
+    // $in means "shop is any one of these". A seller who owns NO shops yet ends
+    // up with `$in: []`, which matches nothing — an empty page, which is
+    // already the right answer. No special case needed.
+    filter = { shop: { $in: myShopIds } };
+  }
+
+  // Same ?status= whitelist as listMyOrders: a misspelt status is a real
+  // mistake worth reporting, not something to quietly ignore.
+  if (req.query.status) {
+    if (!ORDER_STATUSES.includes(req.query.status)) {
+      return next({ status: 400, message: "Invalid status" });
+    }
+    filter.status = req.query.status;
+  }
+
+  const [orders, total] = await Promise.all([
+    findOrders(filter, { skip, limit }),
+    Order.countDocuments(filter),
+  ]);
+
+  res.json({ orders, page, limit, total });
+}
+
+// PATCH /api/orders/:id/status
+// Protected: `auth` only, with NO requireRole — like GET /api/orders/:id, who
+// may do what depends on the ORDER, not on the role alone. A customer may
+// cancel their own pending order; the shop's owner may move it along; an admin
+// may do anything a seller may. The rule book is the TRANSITIONS table in
+// utils/orderQueries.js — this function just asks it and reports the answer.
+async function updateOrderStatus(req, res, next) {
+  // 1. Guard the id from the URL before any database call.
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid order id" });
+  }
+
+  // 2. Load the order. An id in the URL path matching nothing is a 404.
+  const order = await Order.findById(req.params.id);
+  if (!order) {
+    return next({ status: 404, message: "Order not found" });
+  }
+
+  // 3. Who is the caller RELATIVE TO THIS ORDER? A stranger gets 403 here, and
+  //    never learns anything about the order's contents.
+  const actorRole = await resolveActorRole(order, req.user);
+  if (!actorRole) {
+    return next({ status: 403, message: "Forbidden" });
+  }
+
+  // 4. Validate the body. z.enum has already ruled out anything that isn't a
+  //    real status, so the table below only sees sensible values.
+  const result = updateStatusSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  // 5. Ask the ONE rule book whether this move is allowed, and for this person.
+  const verdict = canTransition({
+    from: order.status,
+    to: data.status,
+    actorRole,
+  });
+  if (verdict === "illegal") {
+    // The body was fine; it's the order's CURRENT STATE that conflicts.
+    return next({
+      status: 409,
+      message: `Cannot change a ${order.status} order to ${data.status}`,
+    });
+  }
+  if (verdict === "forbidden") {
+    return next({ status: 403, message: "Forbidden" });
+  }
+
+  // 6. Make the move. cancelReason is only meaningful on a cancellation, so we
+  //    ignore it otherwise rather than letting it linger on a completed order.
+  order.status = data.status;
+  if (data.status === "cancelled" && data.cancelReason !== undefined) {
+    order.cancelReason = data.cancelReason;
+  }
+  await order.save();
+
+  // 7. Return the same populated shape every other order endpoint returns.
+  res.json({ order: await getPopulatedOrder(order._id) });
+}
+
 module.exports = {
   createOrder,
   listMyOrders,
+  listIncomingOrders,
   getOrder,
+  updateOrderStatus,
 };
