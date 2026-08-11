@@ -77,12 +77,14 @@ async function main() {
   const Product = require("../models/Product");
   const Review = require("../models/Review");
   const Cart = require("../models/Cart");
+  const Order = require("../models/Order");
   await Promise.all([
     Listing.init(),
     Product.init(),
     Shop.init(),
     Review.init(),
     Cart.init(),
+    Order.init(),
   ]);
 
   // --- seed data ---
@@ -1220,6 +1222,273 @@ async function main() {
         r.body.results.length === 0 &&
         r.body?.total === 0
     );
+
+    // ======================= Order fixtures =========================
+    // A fresh customer with their own cart, plus listings in TWO different
+    // shops, so checkout has to split one cart into two orders.
+    const orderCustomer = await User.create({
+      name: "Order Customer",
+      email: "ordercustomer@test.com",
+      passwordHash: "x",
+      phone: "0591111111",
+      role: "customer",
+    });
+    const orderCustomerToken = tokenFor(orderCustomer);
+
+    const orderProductA = await Product.create({
+      name: "Order Milk",
+      nameAr: "حليب الطلب",
+      category: category._id,
+      unit: "L",
+    });
+    const orderProductB = await Product.create({
+      name: "Order Bread",
+      nameAr: "خبز الطلب",
+      category: category._id,
+      unit: "piece",
+    });
+    // shopA (owned by `seller`) and otherShop (owned by `otherSeller`).
+    const orderListingA = await Listing.create({
+      shop: shopA._id,
+      product: orderProductA._id,
+      price: 10,
+    });
+    const orderListingB = await Listing.create({
+      shop: otherShop._id,
+      product: orderProductB._id,
+      price: 4,
+    });
+
+    // Small helpers for this section.
+    const addToCart = (token, listingId, quantity) =>
+      req("POST", "/api/cart/items", { token, body: { listing: listingId, quantity } });
+    const findOrderForShop = (body, shopName) =>
+      body?.orders?.find((o) => o.shop?.name === shopName);
+
+    // ================= Orders: POST /api/orders =================
+    console.log("\nPOST /api/orders");
+
+    r = await req("POST", "/api/orders", { body: { contactPhone: "0599" } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("POST", "/api/orders", {
+      token: sellerToken,
+      body: { contactPhone: "0599" },
+    });
+    check("non-customer (seller) → 403", r.status === 403);
+
+    // This customer has never touched their cart → nothing to order.
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599" },
+    });
+    check("no cart at all → 400 Cart is empty", r.status === 400 && r.body?.error === "Cart is empty");
+
+    // Build a cart that MIXES two shops: 3 × Milk (₪10) from Shop A,
+    // 2 × Bread (₪4) from Other Shop.
+    await addToCart(orderCustomerToken, orderListingA.id, 3);
+    await addToCart(orderCustomerToken, orderListingB.id, 2);
+
+    // (zod reports its own "expected string, received undefined" for a MISSING
+    // field — our custom message covers the empty-string case. Same as the
+    // cart's "missing listing → 400" check above: we assert the status.)
+    r = await req("POST", "/api/orders", { token: orderCustomerToken, body: {} });
+    check("missing contactPhone → 400", r.status === 400);
+
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "" },
+    });
+    check("empty contactPhone → 400 Contact phone is required", r.status === 400 && r.body?.error === "Contact phone is required");
+
+    // --- the happy path: one cart becomes TWO orders ---
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599123456", note: "call before 6pm" },
+    });
+    check("checkout → 201", r.status === 201);
+    check("one cart with 2 shops → 2 orders", r.body?.orders?.length === 2);
+
+    const shopAOrder = findOrderForShop(r.body, "Shop A");
+    const otherShopOrder = findOrderForShop(r.body, "Other Shop");
+    const shopAOrderId = shopAOrder?._id;
+
+    check("an order per shop, each with ONE shop", !!shopAOrder && !!otherShopOrder);
+    check("Shop A order has only its own line", shopAOrder?.items?.length === 1 && shopAOrder.items[0].productName === "Order Milk");
+    check("Other Shop order has only its own line", otherShopOrder?.items?.length === 1 && otherShopOrder.items[0].productName === "Order Bread");
+    check("subtotal = 3 × ₪10 = 30", shopAOrder?.subtotal === 30);
+    check("total equals subtotal (no fees in Step 12)", shopAOrder?.total === 30);
+    check("second shop's subtotal = 2 × ₪4 = 8", otherShopOrder?.subtotal === 8);
+    check("status starts at pending", shopAOrder?.status === "pending");
+    check("contactPhone + note stored", shopAOrder?.contactPhone === "0599123456" && shopAOrder?.note === "call before 6pm");
+
+    // The line is a frozen photograph: price + display fields copied onto it.
+    const shopALine = shopAOrder?.items?.[0];
+    check("line froze priceAtOrder (10)", shopALine?.priceAtOrder === 10);
+    check("line froze the product names + unit", shopALine?.productNameAr === "حليب الطلب" && shopALine?.unit === "L");
+    check("line keeps listing + product ids for traceability", !!shopALine?.listing && !!shopALine?.product);
+
+    // Safe population: the seller gets the customer's name + phone (that's the
+    // whole point of the app), but never their email or password hash.
+    check("customer populated with name + phone", shopAOrder?.customer?.name === "Order Customer" && shopAOrder?.customer?.phone !== undefined);
+    check("no email leaked on the customer", shopAOrder?.customer?.email === undefined);
+    check("no owner leaked on the shop", shopAOrder?.shop?.owner === undefined);
+
+    // The cart has done its job and is now empty...
+    r = await req("GET", "/api/cart", { token: orderCustomerToken });
+    check("cart is emptied by checkout", r.body?.cart?.items?.length === 0);
+
+    // ...which makes the cart its own idempotency token: a double-submit can't
+    // silently create a second identical set of orders.
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599123456" },
+    });
+    check("double-submit → 400 Cart is empty (no duplicate orders)", r.status === 400 && r.body?.error === "Cart is empty");
+
+    // --- refusals: things that must block a checkout ---
+    // Out of stock. Note this listing goes in shopB, not shopA: orderProductA
+    // already has a shopA listing, and the unique (shop, product) index would
+    // reject a second one.
+    const oosListing = await Listing.create({
+      shop: shopB._id,
+      product: orderProductA._id,
+      price: 7,
+      inStock: false,
+    });
+    await addToCart(orderCustomerToken, oosListing.id, 1);
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599" },
+    });
+    check("out-of-stock item → 409", r.status === 409 && r.body?.error === "Order Milk is out of stock");
+    await req("DELETE", "/api/cart", { token: orderCustomerToken });
+
+    // A shop that has been hidden can't take orders.
+    const hiddenListing = await Listing.create({
+      shop: inactiveShop._id,
+      product: orderProductB._id,
+      price: 5,
+    });
+    await addToCart(orderCustomerToken, hiddenListing.id, 1);
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599" },
+    });
+    check("inactive shop → 409", r.status === 409 && r.body?.error === "Hidden Shop is not accepting orders right now");
+    await req("DELETE", "/api/cart", { token: orderCustomerToken });
+
+    // A listing deleted AFTER it went into the cart leaves a dangling line. We
+    // must refuse clearly, not crash and not silently drop it.
+    const doomedListing = await Listing.create({
+      shop: shopB._id,
+      product: orderProductB._id,
+      price: 6,
+    });
+    await addToCart(orderCustomerToken, doomedListing.id, 1);
+    await Listing.deleteOne({ _id: doomedListing._id });
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599" },
+    });
+    check("deleted listing in cart → 409 (not a 500)", r.status === 409 && /no longer available/.test(r.body?.error || ""));
+    await req("DELETE", "/api/cart", { token: orderCustomerToken });
+
+    // --- THE SECURITY TEST ---
+    // A client must never be able to set its own price, total, status or owner.
+    // All of those keys are simply absent from the zod whitelist, so they're
+    // stripped. This check is silent when it works and catastrophic if it ever
+    // stops working.
+    await addToCart(orderCustomerToken, orderListingA.id, 1);
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: {
+        contactPhone: "0500000000",
+        subtotal: 1,
+        total: 1,
+        status: "completed",
+        customer: customer.id,
+        shop: otherShop.id,
+        items: [{ productName: "Free stuff", priceAtOrder: 0, quantity: 99 }],
+      },
+    });
+    const hacked = r.body?.orders?.[0];
+    check("injected total/subtotal ignored → server computed ₪10", r.status === 201 && hacked?.total === 10 && hacked?.subtotal === 10);
+    check("injected status ignored → pending", hacked?.status === "pending");
+    check("injected items ignored → the real cart line", hacked?.items?.length === 1 && hacked.items[0].productName === "Order Milk");
+    check("injected customer ignored → the token's user", hacked?.customer?.name === "Order Customer");
+    const secondCheckoutOrderId = hacked?._id;
+
+    // ================= Orders: GET /api/orders =================
+    console.log("\nGET /api/orders");
+
+    r = await req("GET", "/api/orders");
+    check("no token → 401", r.status === 401);
+
+    r = await req("GET", "/api/orders", { token: sellerToken });
+    check("non-customer (seller) → 403", r.status === 403);
+
+    r = await req("GET", "/api/orders", { token: orderCustomerToken });
+    check("my orders → 200", r.status === 200);
+    check("paginated shape { orders, page, limit, total }", Array.isArray(r.body?.orders) && r.body?.page === 1 && r.body?.limit === 20 && r.body?.total === 3);
+    check("newest checkout first", r.body?.orders?.[0]?._id === secondCheckoutOrderId);
+    check("every order belongs to me", r.body?.orders?.every((o) => o.customer?.name === "Order Customer"));
+
+    // A customer with no orders sees an empty page, not an error.
+    r = await req("GET", "/api/orders", { token: customer2Token });
+    check("customer with no orders → empty page, 200", r.status === 200 && r.body?.total === 0);
+
+    r = await req("GET", "/api/orders?status=banana", { token: orderCustomerToken });
+    check("unknown ?status → 400 Invalid status", r.status === 400 && r.body?.error === "Invalid status");
+
+    r = await req("GET", "/api/orders?status=pending", { token: orderCustomerToken });
+    check("?status=pending → all 3", r.body?.total === 3);
+
+    r = await req("GET", "/api/orders?status=completed", { token: orderCustomerToken });
+    check("?status=completed → none yet", r.body?.total === 0);
+
+    r = await req("GET", "/api/orders?limit=2", { token: orderCustomerToken });
+    check("?limit=2 → 2 of 3", r.body?.orders?.length === 2 && r.body?.total === 3);
+
+    // ================= Orders: GET /api/orders/:id =================
+    console.log("\nGET /api/orders/:id");
+
+    r = await req("GET", `/api/orders/${shopAOrderId}`);
+    check("no token → 401", r.status === 401);
+
+    r = await req("GET", "/api/orders/abc", { token: orderCustomerToken });
+    check("invalid order id → 400", r.status === 400 && r.body?.error === "Invalid order id");
+
+    r = await req("GET", `/api/orders/${FAKE_ID}`, { token: orderCustomerToken });
+    check("unknown order id → 404", r.status === 404 && r.body?.error === "Order not found");
+
+    r = await req("GET", `/api/orders/${shopAOrderId}`, { token: orderCustomerToken });
+    check("the customer who placed it → 200", r.status === 200 && r.body?.order?._id === shopAOrderId);
+
+    r = await req("GET", `/api/orders/${shopAOrderId}`, { token: sellerToken });
+    check("the seller who owns the shop → 200", r.status === 200);
+
+    r = await req("GET", `/api/orders/${shopAOrderId}`, { token: adminToken });
+    check("an admin → 200", r.status === 200);
+
+    r = await req("GET", `/api/orders/${shopAOrderId}`, { token: customer2Token });
+    check("a different customer → 403", r.status === 403 && r.body?.error === "Forbidden");
+
+    r = await req("GET", `/api/orders/${shopAOrderId}`, { token: tokenFor(otherSeller) });
+    check("a seller who doesn't own the shop → 403", r.status === 403);
+
+    // ============ THE POINT OF THE WHOLE FEATURE: frozen prices ============
+    // The shop raises its price after the order was placed. The order must NOT
+    // change — it records what was agreed, not what things cost today.
+    await Listing.findByIdAndUpdate(orderListingA._id, { price: 99 });
+
+    r = await req("GET", `/api/products/${orderProductA.id}/listings`);
+    const liveShopA = r.body?.listings?.find((l) => l.shop?.name === "Shop A");
+    check("the LIVE listing price really did change to 99", liveShopA?.price === 99);
+
+    r = await req("GET", `/api/orders/${shopAOrderId}`, { token: orderCustomerToken });
+    check("the order STILL shows priceAtOrder 10", r.body?.order?.items?.[0]?.priceAtOrder === 10);
+    check("the order's subtotal is unchanged (30)", r.body?.order?.subtotal === 30);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

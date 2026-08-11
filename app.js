@@ -8,6 +8,7 @@ const productRoutes = require("./routes/product.routes");
 const listingRoutes = require("./routes/listing.routes");
 const reviewRoutes = require("./routes/review.routes");
 const cartRoutes = require("./routes/cart.routes");
+const orderRoutes = require("./routes/order.routes");
 const homeRoutes = require("./routes/home.routes");
 const searchRoutes = require("./routes/search.routes");
 const errorHandler = require("./middleware/errorHandler");
@@ -28,6 +29,7 @@ app.use("/api/products", productRoutes);
 app.use("/api/listings", listingRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/cart", cartRoutes);
+app.use("/api/orders", orderRoutes);
 app.use("/api/home", homeRoutes);
 app.use("/api/search", searchRoutes);
 
