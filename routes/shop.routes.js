@@ -8,6 +8,7 @@ const {
   createShop,
   updateShop,
   getTopStores,
+  updateDeliveryZones,
 } = require("../controllers/shop.controller");
 const {
   createListing,
@@ -51,6 +52,17 @@ router.patch(
   auth,
   requireRole("seller", "admin"),
   asyncHandler(updateShop)
+);
+
+// Set which areas THIS shop delivers to, and the fee for each. Same auth + role
+// gate as editing a shop; the per-shop ownership rule is enforced inside the
+// controller. NOTE it REPLACES the whole list rather than merging into it.
+// Two-segment path, so it never collides with the one-segment PATCH /:id above.
+router.patch(
+  "/:shopId/delivery-zones",
+  auth,
+  requireRole("seller", "admin"),
+  asyncHandler(updateDeliveryZones)
 );
 
 // Add a listing (a price for a product) to THIS shop. The URL lives under a

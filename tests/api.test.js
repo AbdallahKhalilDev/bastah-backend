@@ -78,6 +78,7 @@ async function main() {
   const Review = require("../models/Review");
   const Cart = require("../models/Cart");
   const Order = require("../models/Order");
+  const Area = require("../models/Area");
   await Promise.all([
     Listing.init(),
     Product.init(),
@@ -85,6 +86,7 @@ async function main() {
     Review.init(),
     Cart.init(),
     Order.init(),
+    Area.init(),
   ]);
 
   // --- seed data ---
@@ -1670,6 +1672,173 @@ async function main() {
 
     r = await req("GET", "/api/orders/incoming?status=cancelled", { token: sellerToken });
     check("inbox ?status=cancelled → the 1 the seller cancelled", r.body?.total === 1);
+
+    // ================= Areas: GET /api/areas =================
+    console.log("\nGET /api/areas");
+
+    const rimal = await Area.create({ name: "Rimal", nameAr: "الرمال", slug: "rimal" });
+    const nuseirat = await Area.create({ name: "Nuseirat", nameAr: "النصيرات", slug: "nuseirat" });
+    const khanYounis = await Area.create({ name: "Khan Younis", nameAr: "خان يونس", slug: "khan-younis" });
+    const retiredArea = await Area.create({
+      name: "Retired Area",
+      nameAr: "منطقة قديمة",
+      slug: "retired-area",
+      isActive: false,
+    });
+
+    r = await req("GET", "/api/areas");
+    check("public, no token needed → 200", r.status === 200);
+    check("returns the 3 ACTIVE areas, hiding the retired one", r.body?.areas?.length === 3);
+    check("sorted by English name (Khan Younis first)", r.body?.areas?.[0]?.name === "Khan Younis");
+    check("each area carries its Arabic name + slug", r.body?.areas?.[0]?.nameAr === "خان يونس" && !!r.body.areas[0].slug);
+
+    // The slug's unique index is what makes `npm run seed:areas` idempotent.
+    let dupErr = null;
+    try {
+      await Area.create({ name: "Rimal Again", nameAr: "x", slug: "rimal" });
+    } catch (err) {
+      dupErr = err;
+    }
+    check("duplicate slug rejected by the unique index", dupErr?.code === 11000);
+
+    // ========== Delivery zones: PATCH /api/shops/:shopId/delivery-zones ==========
+    console.log("\nPATCH /api/shops/:shopId/delivery-zones");
+
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      body: { zones: [] },
+    });
+    check("no token → 401", r.status === 401);
+
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: customerToken,
+      body: { zones: [] },
+    });
+    check("a customer → 403", r.status === 403);
+
+    // A seller may configure only their OWN shop.
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: tokenFor(otherSeller),
+      body: { zones: [] },
+    });
+    check("a seller who doesn't own the shop → 403", r.status === 403 && r.body?.error === "Forbidden");
+
+    r = await req("PATCH", "/api/shops/abc/delivery-zones", {
+      token: sellerToken,
+      body: { zones: [] },
+    });
+    check("invalid shop id → 400", r.status === 400 && r.body?.error === "Invalid shop id");
+
+    r = await req("PATCH", `/api/shops/${FAKE_ID}/delivery-zones`, {
+      token: sellerToken,
+      body: { zones: [] },
+    });
+    check("unknown shop → 404", r.status === 404 && r.body?.error === "Shop not found");
+
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: sellerToken,
+      body: {},
+    });
+    check("missing zones array → 400", r.status === 400);
+
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: sellerToken,
+      body: { zones: [{ area: rimal.id, fee: -1 }] },
+    });
+    check("negative fee → 400", r.status === 400 && r.body?.error === "Fee cannot be negative");
+
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: sellerToken,
+      body: { zones: [{ area: "abc", fee: 5 }] },
+    });
+    check("invalid area id → 400 (body id, so 400 not 404)", r.status === 400 && r.body?.error === "Invalid area id");
+
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: sellerToken,
+      body: { zones: [{ area: FAKE_ID, fee: 5 }] },
+    });
+    check("area doesn't exist → 400 Area not found", r.status === 400 && r.body?.error === "Area not found");
+
+    // One shop must not list the same area twice with two different fees. This
+    // is a per-document rule, so it can't be a unique index.
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: sellerToken,
+      body: {
+        zones: [
+          { area: rimal.id, fee: 5 },
+          { area: rimal.id, fee: 9 },
+        ],
+      },
+    });
+    check("same area twice → 400 Duplicate delivery zone", r.status === 400 && r.body?.error === "Duplicate delivery zone");
+
+    // --- the happy path ---
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: sellerToken,
+      body: {
+        zones: [
+          { area: rimal.id, fee: 5 },
+          { area: nuseirat.id, fee: 10 },
+        ],
+      },
+    });
+    check("set 2 zones → 200", r.status === 200 && r.body?.shop?.deliveryZones?.length === 2);
+    const rimalZone = r.body?.shop?.deliveryZones?.find((z) => z.area?.slug === "rimal");
+    check("the zone's area is populated (name/nameAr/slug)", rimalZone?.area?.name === "Rimal" && rimalZone?.area?.nameAr === "الرمال");
+    check("the fee is stored alongside it", rimalZone?.fee === 5);
+
+    // A fee of 0 is a real answer — "I deliver here for free" — not a missing one.
+    r = await req("PATCH", `/api/shops/${shopB.id}/delivery-zones`, {
+      token: sellerToken,
+      body: { zones: [{ area: rimal.id, fee: 0 }] },
+    });
+    check("fee 0 (free delivery) is allowed", r.status === 200 && r.body?.shop?.deliveryZones?.[0]?.fee === 0);
+
+    // An admin may configure any shop.
+    r = await req("PATCH", `/api/shops/${otherShop.id}/delivery-zones`, {
+      token: adminToken,
+      body: { zones: [{ area: khanYounis.id, fee: 7 }] },
+    });
+    check("an admin can set any shop's zones → 200", r.status === 200);
+
+    // REPLACES, doesn't merge — this is the surprising bit worth testing.
+    r = await req("PATCH", `/api/shops/${shopA.id}/delivery-zones`, {
+      token: sellerToken,
+      body: { zones: [{ area: khanYounis.id, fee: 3 }] },
+    });
+    check("PATCH REPLACES the whole list (2 zones → 1)", r.status === 200 && r.body?.shop?.deliveryZones?.length === 1);
+    check("the replacement is the new zone, not the old ones", r.body?.shop?.deliveryZones?.[0]?.area?.slug === "khan-younis");
+
+    // ============ GET /api/shops?deliversTo= ============
+    console.log("\nGET /api/shops?deliversTo=");
+    // State: shopA → Khan Younis ₪3 · shopB → Rimal ₪0 · otherShop → Khan Younis ₪7
+    // (inactiveShop has no zones and is hidden from public reads anyway.)
+
+    r = await req("GET", "/api/shops");
+    check("no filter → all active shops, unchanged behaviour", r.status === 200 && r.body?.shops?.length >= 3);
+
+    r = await req("GET", `/api/shops?deliversTo=${khanYounis.id}`);
+    const kyNames = (r.body?.shops || []).map((s) => s.name).sort();
+    check("?deliversTo=Khan Younis → the 2 shops that cover it", r.status === 200 && kyNames.length === 2);
+    check("...and they're the right two", kyNames[0] === "Other Shop" && kyNames[1] === "Shop A");
+
+    r = await req("GET", `/api/shops?deliversTo=${rimal.id}`);
+    check("?deliversTo=Rimal → only Shop B (fee 0)", r.body?.shops?.length === 1 && r.body.shops[0].name === "Shop B");
+
+    r = await req("GET", `/api/shops?deliversTo=${nuseirat.id}`);
+    check("?deliversTo=Nuseirat → nobody covers it any more", r.body?.shops?.length === 0);
+
+    r = await req("GET", "/api/shops?deliversTo=abc");
+    check("malformed area id → 400 (not a 500)", r.status === 400 && r.body?.error === "Invalid area id");
+
+    // A shop's own profile shows its zones, so a customer can see the fee.
+    r = await req("GET", `/api/shops/${shopA.id}`);
+    check("GET /api/shops/:id includes populated deliveryZones", r.body?.shop?.deliveryZones?.[0]?.area?.name === "Khan Younis");
+    check("...and still leaks no owner email", r.body?.shop?.owner?.email === undefined);
+
+    // Zones are NOT added to the compact public projection, so the homepage
+    // cards and search results are untouched by this feature.
+    r = await req("GET", "/api/shops/top");
+    check("/api/shops/top stays lean (no deliveryZones)", r.body?.shops?.[0]?.deliveryZones === undefined);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
