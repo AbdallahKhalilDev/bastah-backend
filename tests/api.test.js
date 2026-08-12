@@ -1839,6 +1839,187 @@ async function main() {
     // cards and search results are untouched by this feature.
     r = await req("GET", "/api/shops/top");
     check("/api/shops/top stays lean (no deliveryZones)", r.body?.shops?.[0]?.deliveryZones === undefined);
+
+    // ============ Delivery at checkout (Step 13, slice 13.2) ============
+    console.log("\nPOST /api/orders with deliveryMethod");
+    // Zones right now: shopA → Khan Younis ₪3 · shopB → Rimal ₪0
+    //                  otherShop → Khan Younis ₪7
+    // orderListingA lives in shopA; orderListingB lives in otherShop.
+
+    // Every order placed before this feature must still read correctly.
+    r = await req("GET", `/api/orders/${shopAOrderId}`, { token: orderCustomerToken });
+    check("orders created before delivery existed default to pickup", r.body?.order?.deliveryMethod === "pickup");
+    check("...with fee 0 and no address (no migration needed)", r.body?.order?.deliveryFee === 0 && r.body?.order?.deliveryAddress === null);
+
+    // Omitting deliveryMethod still means pickup.
+    await addToCart(orderCustomerToken, orderListingA.id, 1);
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599" },
+    });
+    check("omitting deliveryMethod → pickup, fee 0", r.status === 201 && r.body?.orders?.[0]?.deliveryMethod === "pickup" && r.body.orders[0].deliveryFee === 0);
+    check("pickup total still equals subtotal", r.body?.orders?.[0]?.total === r.body?.orders?.[0]?.subtotal);
+
+    // A delivery order needs somewhere to go.
+    await addToCart(orderCustomerToken, orderListingA.id, 1);
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599", deliveryMethod: "delivery" },
+    });
+    check("delivery with no address → 400", r.status === 400 && r.body?.error === "Delivery address is required");
+
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599", deliveryMethod: "delivery", address: { area: "abc" } },
+    });
+    check("malformed area id → 400", r.status === 400 && r.body?.error === "Invalid area id");
+
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599", deliveryMethod: "delivery", address: { area: FAKE_ID } },
+    });
+    check("unknown area → 400 Area not found", r.status === 400 && r.body?.error === "Area not found");
+
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599", deliveryMethod: "teleport", address: { area: khanYounis.id } },
+    });
+    check("bogus deliveryMethod → 400", r.status === 400);
+
+    // shopA covers Khan Younis (₪3) but NOT Rimal.
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: {
+        contactPhone: "0599",
+        deliveryMethod: "delivery",
+        address: { area: rimal.id, details: "Al-Wehda St" },
+      },
+    });
+    check("shop doesn't cover that area → 409 with both names", r.status === 409 && r.body?.error === "Shop A does not deliver to Rimal");
+
+    // The whole checkout was rejected, so the cart is untouched and retryable.
+    r = await req("GET", "/api/cart", { token: orderCustomerToken });
+    check("a rejected checkout leaves the cart intact", r.body?.cart?.items?.length === 1);
+
+    // --- the happy path: delivery to an area the shop DOES cover ---
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: {
+        contactPhone: "0599",
+        deliveryMethod: "delivery",
+        address: { area: khanYounis.id, details: "Building 12, 3rd floor" },
+      },
+    });
+    const deliveryOrder = r.body?.orders?.[0];
+    const deliveryOrderId = deliveryOrder?._id;
+    check("delivery to a covered area → 201", r.status === 201);
+    check("deliveryMethod recorded", deliveryOrder?.deliveryMethod === "delivery");
+    check("fee resolved from the SHOP's zone (₪3)", deliveryOrder?.deliveryFee === 3);
+    // NOTE the price is 99, not 10: the frozen-price section above raised this
+    // listing to ₪99. That's the point — the ORDER froze 10, the LISTING moved on.
+    check("total = subtotal + fee (99 + 3 = 102)", deliveryOrder?.subtotal === 99 && deliveryOrder?.total === 102);
+    check("address stored with the area populated", deliveryOrder?.deliveryAddress?.area?.name === "Khan Younis");
+    check("...and the free-text details kept", deliveryOrder?.deliveryAddress?.details === "Building 12, 3rd floor");
+
+    // A fee of 0 is a real answer — free delivery — not "doesn't deliver".
+    // shopB covers Rimal at ₪0. Its listing is oosListing... which is out of
+    // stock, so give shopB a fresh in-stock listing to order.
+    const freeDeliveryListing = await Listing.create({
+      shop: shopB._id,
+      product: orderProductB._id,
+      price: 20,
+    });
+    await addToCart(orderCustomerToken, freeDeliveryListing.id, 1);
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: {
+        contactPhone: "0599",
+        deliveryMethod: "delivery",
+        address: { area: rimal.id },
+      },
+    });
+    check("₪0 zone means FREE delivery, not 'no delivery' → 201", r.status === 201);
+    check("fee 0, total unchanged from subtotal", r.body?.orders?.[0]?.deliveryFee === 0 && r.body?.orders?.[0]?.total === 20);
+
+    // Per-shop fees: one checkout spanning two shops resolves each separately.
+    await addToCart(orderCustomerToken, orderListingA.id, 1); // shopA, KY ₪3
+    await addToCart(orderCustomerToken, orderListingB.id, 1); // otherShop, KY ₪7
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: {
+        contactPhone: "0599",
+        deliveryMethod: "delivery",
+        address: { area: khanYounis.id },
+      },
+    });
+    const feeByShop = {};
+    (r.body?.orders || []).forEach((o) => { feeByShop[o.shop.name] = o.deliveryFee; });
+    check("two shops in one checkout → 2 orders", r.body?.orders?.length === 2);
+    check("each order carries ITS OWN shop's fee (3 and 7)", feeByShop["Shop A"] === 3 && feeByShop["Other Shop"] === 7);
+
+    // ============ The `delivering` status ============
+    console.log("\nPATCH /api/orders/:id/status — the delivering step");
+
+    // On a PICKUP order, `delivering` isn't a move that exists for anyone.
+    await addToCart(orderCustomerToken, orderListingA.id, 1);
+    r = await req("POST", "/api/orders", {
+      token: orderCustomerToken,
+      body: { contactPhone: "0599" },
+    });
+    const pickupOrderId = r.body?.orders?.[0]?._id;
+    await req("PATCH", `/api/orders/${pickupOrderId}/status`, { token: sellerToken, body: { status: "accepted" } });
+    await req("PATCH", `/api/orders/${pickupOrderId}/status`, { token: sellerToken, body: { status: "ready" } });
+
+    r = await req("PATCH", `/api/orders/${pickupOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "delivering" },
+    });
+    check("PICKUP order can't go to delivering → 409", r.status === 409 && r.body?.error === "Cannot change a ready order to delivering");
+
+    r = await req("PATCH", `/api/orders/${pickupOrderId}/status`, {
+      token: adminToken,
+      body: { status: "delivering" },
+    });
+    check("...not even for an admin (it's illegal, not forbidden)", r.status === 409);
+
+    r = await req("PATCH", `/api/orders/${pickupOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "completed" },
+    });
+    check("a pickup order still goes ready → completed → 200", r.status === 200 && r.body?.order?.status === "completed");
+
+    // On a DELIVERY order, the extra step exists.
+    r = await req("PATCH", `/api/orders/${deliveryOrderId}/status`, { token: sellerToken, body: { status: "accepted" } });
+    check("delivery order: pending → accepted", r.status === 200);
+    r = await req("PATCH", `/api/orders/${deliveryOrderId}/status`, { token: sellerToken, body: { status: "ready" } });
+    check("delivery order: accepted → ready", r.status === 200);
+
+    r = await req("PATCH", `/api/orders/${deliveryOrderId}/status`, {
+      token: orderCustomerToken,
+      body: { status: "delivering" },
+    });
+    check("the customer can't mark it delivering → 403 (their move, no)", r.status === 403);
+
+    r = await req("PATCH", `/api/orders/${deliveryOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "delivering" },
+    });
+    check("DELIVERY order: ready → delivering → 200", r.status === 200 && r.body?.order?.status === "delivering");
+
+    r = await req("PATCH", `/api/orders/${deliveryOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "ready" },
+    });
+    check("can't go backwards from delivering → 409", r.status === 409);
+
+    r = await req("PATCH", `/api/orders/${deliveryOrderId}/status`, {
+      token: sellerToken,
+      body: { status: "completed" },
+    });
+    check("delivering → completed → 200", r.status === 200 && r.body?.order?.status === "completed");
+
+    r = await req("GET", "/api/orders?status=delivering", { token: orderCustomerToken });
+    check("?status=delivering is now a valid filter", r.status === 200);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {

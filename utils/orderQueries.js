@@ -20,6 +20,7 @@ const ORDER_STATUSES = [
   "pending",
   "accepted",
   "ready",
+  "delivering",
   "completed",
   "cancelled",
 ];
@@ -27,14 +28,23 @@ const ORDER_STATUSES = [
 // --- THE STATE MACHINE ----------------------------------------------------
 // An order can't jump anywhere it likes. It walks a path:
 //
-//   pending → accepted → ready → completed
-//      ↘         ↘         ↘
-//            cancelled
+//   pickup:    pending → accepted → ready ──────────────→ completed
+//   delivery:  pending → accepted → ready → delivering → completed
+//                 ↘         ↘         ↘          ↘
+//                          cancelled
 //
-// `ready` means "the shop has the goods packed and set aside" — i.e. come and
-// collect them. `completed` means "THE CUSTOMER HAS THE GOODS". It does NOT
-// mean "paid": no money moves through this app. `completed` and `cancelled` are
-// TERMINAL — nothing leaves them, for anybody, including an admin.
+// ONE table covers both, and the trick that makes that work is what `ready`
+// means: "the shop has the goods packed and set aside." For a pickup order
+// that reads as "come and collect them"; for a delivery order it reads as
+// "packed, about to leave." One state, one meaning, two readings.
+//
+// `delivering` is the only delivery-specific value, and it is legal ONLY when
+// deliveryMethod === "delivery" — enforced in canTransition below, NOT by a
+// second enum or a parallel table.
+//
+// `completed` means "THE CUSTOMER HAS THE GOODS". It does NOT mean "paid": no
+// money moves through this app. `completed` and `cancelled` are TERMINAL —
+// nothing leaves them, for anybody, including an admin.
 //
 // Read the table as: from THIS status you may move to THESE statuses, and each
 // move is allowed only to THESE actors. A status missing from a row is not
@@ -66,9 +76,17 @@ const TRANSITIONS = {
     cancelled: ["seller", "admin"],
   },
   ready: {
+    // DELIVERY ORDERS ONLY — the extra check is in canTransition. On a pickup
+    // order this move simply doesn't exist.
+    delivering: ["seller", "admin"],
     completed: ["seller", "admin"],
     // The goods are packed with the customer's name on them. Only the shop can
     // call it off now (a no-show, say).
+    cancelled: ["seller", "admin"],
+  },
+  delivering: {
+    completed: ["seller", "admin"],
+    // Nobody home, wrong address, and so on.
     cancelled: ["seller", "admin"],
   },
   // Terminal. Nobody un-completes or un-cancels an order.
@@ -92,9 +110,15 @@ const TRANSITIONS = {
 // 409). It also gives the frontend an actionable distinction: a 409 means
 // "refresh, someone else moved this on", a 403 means "this button shouldn't be
 // here for you".
-function canTransition({ from, to, actorRole }) {
+function canTransition({ from, to, actorRole, deliveryMethod }) {
   const allowed = TRANSITIONS[from];
   if (!allowed || !allowed[to]) return "illegal";
+
+  // "delivering" only makes sense when the shop is actually bringing it. On a
+  // pickup order this move doesn't exist FOR ANYONE — not even an admin — so
+  // it's "illegal" (a 409), not "forbidden" (a 403).
+  if (to === "delivering" && deliveryMethod !== "delivery") return "illegal";
+
   if (!allowed[to].includes(actorRole)) return "forbidden";
   return "ok";
 }
@@ -119,6 +143,10 @@ function canTransition({ from, to, actorRole }) {
 const ORDER_POPULATE = [
   { path: "customer", select: "name phone" },
   { path: "shop", select: "name area phone" },
+  // The delivery address stores an Area id; swap it for the readable name so
+  // the seller sees "Rimal", not an id. Harmless on pickup orders, where
+  // deliveryAddress is null and there is nothing to populate.
+  { path: "deliveryAddress.area", select: "name nameAr slug" },
 ];
 
 // Load ONE order, fully populated. Returns null if the id matches nothing.
@@ -194,6 +222,20 @@ function money(n) {
   return Math.round(n * 100) / 100;
 }
 
+// What does THIS shop charge to deliver to THIS area?
+//
+// Returns the fee, or **null** meaning "this shop does not deliver there at
+// all". That distinction is the entire point of this function, and it's why the
+// caller must NOT write `resolveDeliveryFee(...) || 0`: a fee of 0 is a real,
+// meaningful answer ("free delivery"), and `|| 0` would silently turn "we don't
+// go there" into "we go there for free". Check for null explicitly.
+function resolveDeliveryFee(shop, areaId) {
+  const zone = (shop.deliveryZones || []).find(
+    (z) => z.area.toString() === String(areaId)
+  );
+  return zone ? zone.fee : null;
+}
+
 module.exports = {
   ORDER_STATUSES,
   TRANSITIONS,
@@ -204,4 +246,5 @@ module.exports = {
   isOrderSeller,
   resolveActorRole,
   money,
+  resolveDeliveryFee,
 };

@@ -96,6 +96,31 @@ const orderItemSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// --- WHERE a delivery goes ------------------------------------------------
+// A structured `area` (a real Area id, so it can be matched against a shop's
+// delivery zones) plus free text for the last fifty metres. There is no map
+// integration in Bastah, so this is as precise as an address gets — and it's
+// plenty for a driver who already knows the neighbourhood.
+//
+// Like everything else on an order, it's a FROZEN snapshot: if the customer
+// later edits their saved address, THIS order still records where it actually
+// went. lat/lng would slot in here later without disturbing anything.
+const deliveryAddressSchema = new mongoose.Schema(
+  {
+    area: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Area",
+      required: true,
+    },
+    // "Al-Wehda St, building 12, 3rd floor, next to the pharmacy"
+    details: {
+      type: String,
+      trim: true,
+    },
+  },
+  { _id: false }
+);
+
 const orderSchema = new mongoose.Schema(
   {
     // WHO placed it. Always set from the login token, never from the request
@@ -143,16 +168,48 @@ const orderSchema = new mongoose.Schema(
       min: 0,
     },
 
-    // What the customer will hand over in cash. Today `total === subtotal`;
-    // Step 13 adds a delivery fee and total becomes subtotal + deliveryFee.
+    // What the customer will hand over in cash: subtotal + deliveryFee.
     //
-    // We store it NOW, even though it's currently a duplicate of subtotal, so
-    // the frontend has ONE field to display and never has to learn the
-    // formula — and never has to re-learn it when Step 13 changes it.
+    // The frontend displays THIS and never has to know the formula. (It was
+    // stored from the very first slice, when it merely equalled subtotal,
+    // precisely so that adding the fee here changed nothing for the client.)
     total: {
       type: Number,
       required: true,
       min: 0,
+    },
+
+    // --- Delivery --------------------------------------------------------
+    // pickup   = the customer collects from the shop (everything before Step 13).
+    // delivery = the SHOP ITSELF brings it. There is no courier role in Bastah
+    //            and nobody to assign — the seller arranges it as they always do.
+    //
+    // The default is what makes every order created before this feature
+    // retroactively and correctly a PICKUP order — which is why adding delivery
+    // needed no migration script at all.
+    deliveryMethod: {
+      type: String,
+      enum: ["pickup", "delivery"],
+      default: "pickup",
+    },
+
+    // Resolved at checkout from the SHOP'S zone for the customer's chosen area,
+    // and then FROZEN — exactly like priceAtOrder. A shop may re-price its zones
+    // tomorrow; this order must keep saying what was agreed today.
+    //
+    // Always 0 for pickup. And, like every other number here: INFORMATIONAL.
+    // No money moves through this app — the customer hands this to the shop's
+    // own person, in cash, on the doorstep.
+    deliveryFee: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
+    // null for pickup orders; required (enforced in the controller) for delivery.
+    deliveryAddress: {
+      type: deliveryAddressSchema,
+      default: null,
     },
 
     // Where the order is in its life.
@@ -166,7 +223,16 @@ const orderSchema = new mongoose.Schema(
     // order starts at.
     status: {
       type: String,
-      enum: ["pending", "accepted", "ready", "completed", "cancelled"],
+      enum: [
+        "pending",
+        "accepted",
+        "ready",
+        // Only ever reachable when deliveryMethod === "delivery" — the shop is
+        // on its way. Enforced by the transition table, not by this enum.
+        "delivering",
+        "completed",
+        "cancelled",
+      ],
       default: "pending",
     },
 

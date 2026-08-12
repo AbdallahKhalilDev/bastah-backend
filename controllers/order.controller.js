@@ -9,6 +9,7 @@ const parsePagination = require("../utils/pagination");
 // shop attached — that is exactly what checkout needs, so there is no reason to
 // describe it a second time.
 const { getPopulatedCart } = require("./cart.controller");
+const Area = require("../models/Area");
 const {
   ORDER_STATUSES,
   canTransition,
@@ -16,6 +17,7 @@ const {
   findOrders,
   resolveActorRole,
   money,
+  resolveDeliveryFee,
 } = require("../utils/orderQueries");
 
 // --- Input validation -----------------------------------------------------
@@ -31,6 +33,20 @@ const {
 const createOrderSchema = z.object({
   contactPhone: z.string().min(1, "Contact phone is required"),
   note: z.string().optional(),
+  // Omitted means "pickup" — which keeps every client written before delivery
+  // existed working exactly as it did.
+  deliveryMethod: z.enum(["pickup", "delivery"], {
+    error: "Delivery method must be pickup or delivery",
+  }).optional(),
+  // Required only when deliveryMethod is "delivery". zod can express that with
+  // .refine(), but a plain `if` after safeParse reads more clearly and is one
+  // less new concept — see createOrder below.
+  address: z
+    .object({
+      area: z.string().min(1, "Area is required"),
+      details: z.string().optional(),
+    })
+    .optional(),
 });
 
 // A WHITELIST for moving an order along. `status` is the status you want to move
@@ -70,6 +86,28 @@ async function createOrder(req, res, next) {
     return next({ status: 400, message });
   }
   const data = result.data;
+
+  // 1b. Pickup or delivery? Default to pickup when unsaid.
+  //
+  //     A delivery order NEEDS somewhere to go, so the address becomes required
+  //     here. Both of these are the caller's mistake, so both are 400 — and we
+  //     check them BEFORE touching the cart, since neither depends on it.
+  const isDelivery = data.deliveryMethod === "delivery";
+  let area = null;
+  if (isDelivery) {
+    if (!data.address) {
+      return next({ status: 400, message: "Delivery address is required" });
+    }
+    // The area id came in the BODY, so a bad one is a 400 (not a 404) — the
+    // same rule createShop follows for a body-supplied category id.
+    if (!mongoose.Types.ObjectId.isValid(data.address.area)) {
+      return next({ status: 400, message: "Invalid area id" });
+    }
+    area = await Area.findById(data.address.area);
+    if (!area) {
+      return next({ status: 400, message: "Area not found" });
+    }
+  }
 
   // 2. Load the caller's own cart, fully populated, via the CART's own helper.
   //    Resolved from the verified token — never from anything the client sends.
@@ -155,23 +193,48 @@ async function createOrder(req, res, next) {
       items.reduce((sum, line) => sum + line.priceAtOrder * line.quantity, 0)
     );
 
+    // THE DELIVERY FEE, resolved PER SHOP — each shop sets its own price for
+    // each area it covers, so two orders from one checkout can carry different
+    // fees. Like priceAtOrder, it's frozen here and never recomputed.
+    let deliveryFee = 0;
+    if (isDelivery) {
+      const fee = resolveDeliveryFee(shop, area._id);
+      // NOTE: `fee === null` means "this shop doesn't go there at all", which is
+      // a completely different thing from a fee of 0 ("free delivery"). Testing
+      // for null explicitly — never `fee || 0` — is what keeps those apart.
+      if (fee === null) {
+        return next({
+          status: 409,
+          message: `${shop.name} does not deliver to ${area.name}`,
+        });
+      }
+      deliveryFee = fee;
+    }
+
     docs.push({
       customer: req.user.id,
       shop: shop._id,
       items,
       subtotal,
-      // Today total === subtotal. Step 13 adds a delivery fee and this becomes
-      // subtotal + deliveryFee — the frontend keeps reading the same field.
-      total: subtotal,
+      deliveryFee,
+      // ONE number for the frontend to display. It never has to know the
+      // formula — which is exactly why we stored `total` from the first slice,
+      // back when it merely equalled subtotal.
+      total: money(subtotal + deliveryFee),
+      deliveryMethod: isDelivery ? "delivery" : "pickup",
+      deliveryAddress: isDelivery
+        ? { area: area._id, details: data.address.details }
+        : null,
       contactPhone: data.contactPhone,
       note: data.note,
     });
   }
-  // A note on the two 409s above: either one rejects the ENTIRE checkout, not
-  // just the offending shop's order. A partial checkout ("we ordered from 2 of
-  // your 3 shops") is a surprise, and surprises are exactly what destroy trust
-  // in a marketplace where no money is held and everything rests on the seller
-  // turning up. The customer removes that shop's items and tries again.
+  // A note on the three 409s above: any one of them rejects the ENTIRE
+  // checkout, not just the offending shop's order. A partial checkout ("we
+  // ordered from 2 of your 3 shops") is a surprise, and surprises are exactly
+  // what destroy trust in a marketplace where no money is held and everything
+  // rests on the seller turning up. The customer removes that shop's items (or
+  // switches to pickup) and tries again.
 
   // 7. WRITE. insertMany sends all N documents in a SINGLE round trip (Mongoose
   //    still runs each document's schema validators). Because steps 3–6 already
@@ -356,6 +419,9 @@ async function updateOrderStatus(req, res, next) {
     from: order.status,
     to: data.status,
     actorRole,
+    // The table needs this to know whether "delivering" is a real move for THIS
+    // order — it isn't, on a pickup order.
+    deliveryMethod: order.deliveryMethod,
   });
   if (verdict === "illegal") {
     // The body was fine; it's the order's CURRENT STATE that conflicts.
