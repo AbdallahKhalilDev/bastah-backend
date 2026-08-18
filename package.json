@@ -11,6 +11,7 @@
     "seed:products": "node seed/products.seed.js",
     "seed:listings": "node seed/listings.seed.js",
     "seed:areas": "node seed/areas.seed.js",
+    "seed:delivery-zones": "node seed/deliveryZones.seed.js",
     "set-role": "node scripts/setRole.js"
   },
   "dependencies": {
