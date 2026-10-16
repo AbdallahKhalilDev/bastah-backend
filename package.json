@@ -28,5 +28,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "allowScripts": {
+    "bcrypt@6.0.0": true
   }
 }
