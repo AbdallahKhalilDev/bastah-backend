@@ -197,7 +197,24 @@ async function main() {
     });
     check("valid → 201", r.status === 201);
     check("returns product with category populated", r.body?.product?.category?.name === "Grocery");
+    check(
+      "a new product starts on the placeholder image",
+      r.body?.product?.imageUrl === "/images/products/default.jpg"
+    );
     const productId = r.body?.product?._id;
+
+    // imageUrl is NOT in the create whitelist, so a client can't point it at an
+    // arbitrary URL. zod strips it and the schema default applies.
+    r = await req("POST", "/api/products", {
+      token: sellerToken,
+      body: { name: "Rice", nameAr: "أرز", category: category.id, imageUrl: "https://evil.example/x.png" },
+    });
+    check(
+      "a client-sent imageUrl is ignored → still the placeholder",
+      r.status === 201 && r.body?.product?.imageUrl === "/images/products/default.jpg"
+    );
+    // Remove it again: the browse tests below count on "Sugar" being the only product.
+    await Product.deleteOne({ _id: r.body?.product?._id });
 
     // ============ Listings: POST /api/shops/:shopId/listings ============
     console.log("\nPOST /api/shops/:shopId/listings");

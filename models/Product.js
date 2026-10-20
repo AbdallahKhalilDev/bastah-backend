@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { DEFAULT_PRODUCT_IMAGE } = require("../utils/productImages");
 
 // A "schema" is the shape/blueprint of a document in a MongoDB collection.
 // This one describes a Product — the CANONICAL catalog item, i.e. one document
@@ -46,10 +47,17 @@ const productSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    // ONE generic image per product, shared by every shop that sells it (a Listing
+    // has no image of its own). Always a RELATIVE path to a file served from
+    // public/images/products/, e.g. "/images/products/football.webp".
+    // The default is the "no photo yet" placeholder, so a brand-new product shows
+    // something sensible immediately. `npm run seed:product-images` swaps in the
+    // real photo once a matching file is added. Clients can't set this field: it's
+    // kept out of the create whitelist, so it stays a path we control.
     imageUrl: {
       type: String,
       trim: true,
-      // optional — a product can exist without a picture
+      default: DEFAULT_PRODUCT_IMAGE,
     },
     // Whether this product is "featured" on the Home page. This is an
     // EDITORIAL / admin-only flag, exactly like a shop's `isVerified`: a seller

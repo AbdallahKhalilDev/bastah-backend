@@ -11,14 +11,17 @@ const escapeRegex = require("../utils/escapeRegex");
 // WHITELIST: only these keys are accepted. By default zod *strips* any other key
 // it doesn't know about, so if a client sneaks in something unexpected it's
 // silently dropped and can never reach the database. name/nameAr/category are
-// the required ones; description/unit/imageUrl are optional extras.
+// the required ones; description/unit are optional extras.
+// imageUrl is deliberately NOT here: product images are files we manage on the
+// server, so a new product gets the placeholder (the schema default) and
+// `npm run seed:product-images` links its real photo later. If a client sends
+// imageUrl anyway, zod strips it like any other unknown key.
 const createProductSchema = z.object({
   name: z.string().min(1, "Name is required"),
   nameAr: z.string().min(1, "Arabic name is required"),
   description: z.string().optional(),
   category: z.string().min(1, "Category is required"),
   unit: z.string().optional(),
-  imageUrl: z.string().optional(),
 });
 
 // The body for the admin-only "feature / un-feature" route. It's a single

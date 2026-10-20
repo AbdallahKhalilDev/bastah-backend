@@ -11,6 +11,7 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 const connectDB = require("../config/db");
 const Category = require("../models/Category");
+const slugify = require("../utils/slugify"); // "Electronics & Home" -> "electronics-home"
 
 // The six top-level categories from the visual map. Each has an English and an
 // Arabic name (the app is bilingual). They're all top-level, so parent = null.
@@ -22,19 +23,6 @@ const categories = [
   { name: "Health", nameAr: "صحة" },
   { name: "Sports", nameAr: "رياضة" },
 ];
-
-// Turn an English name into a URL-safe slug:
-//   "Electronics & Home" -> "electronics-home"   "Men" -> "men"
-// Lowercase everything, replace any run of non-alphanumeric characters with a
-// single dash, then trim dashes off the ends.
-// (Kept inline here; we can promote it to utils/ later if a create endpoint
-//  needs the same logic.)
-function slugify(name) {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
 
 async function seedCategories() {
   await connectDB();

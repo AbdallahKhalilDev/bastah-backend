@@ -9,6 +9,7 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 const connectDB = require("../config/db");
 const Area = require("../models/Area");
+const slugify = require("../utils/slugify");
 
 // The areas, north → south, grouped by governorate. Each has an English and an
 // Arabic name because the app is bilingual.
@@ -51,17 +52,6 @@ const areas = [
   { name: "Tel al-Sultan", nameAr: "تل السلطان" },
   { name: "Shaboura", nameAr: "الشابورة" },
 ];
-
-// Turn an English name into a URL-safe slug:
-//   "Khan Younis" -> "khan-younis"   "Tel al-Hawa" -> "tel-al-hawa"
-// (Kept inline here, same as categories.seed.js; we can promote it to utils/
-//  later if a create endpoint ever needs the same logic.)
-function slugify(name) {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
 
 async function seedAreas() {
   await connectDB();
