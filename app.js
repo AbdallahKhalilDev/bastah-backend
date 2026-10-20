@@ -1,3 +1,4 @@
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const healthRoutes = require("./routes/health.routes");
@@ -21,6 +22,19 @@ const app = express();
 app.use(cors({ origin: true }));
 
 app.use(express.json());
+
+// Product images are plain files committed to git under public/images/, so they
+// ship with every deploy (Render only wipes files written WHILE the server runs).
+// express.static is Express's built-in file server: GET /images/products/x.webp
+// returns public/images/products/x.webp with the right Content-Type. No controller
+// needed. The DB stores only the relative path in Product.imageUrl.
+// maxAge "7d" lets phones/browsers keep an image for a week instead of re-downloading
+// it — it saves Render bandwidth. So when REPLACING a photo, give it a new file name.
+// A missing file falls through to the 404 handler below.
+app.use(
+  "/images",
+  express.static(path.join(__dirname, "public", "images"), { maxAge: "7d" })
+);
 
 app.use("/api/health", healthRoutes);
 app.use("/api/auth", authRoutes);

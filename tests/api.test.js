@@ -2020,6 +2020,29 @@ async function main() {
 
     r = await req("GET", "/api/orders?status=delivering", { token: orderCustomerToken });
     check("?status=delivering is now a valid filter", r.status === 200);
+
+    // ===== Static product images (served by express.static, not a controller) =====
+    // We call fetch directly instead of req(), because req() expects a JSON body
+    // and an image is binary.
+    console.log("\nGET /images/products/:file (static images)");
+
+    let img = await fetch(base + "/images/products/headphones.webp");
+    check("an existing image → 200", img.status === 200);
+    check("...served as image/webp", img.headers.get("content-type") === "image/webp");
+    check(
+      "...with a 7-day browser cache header",
+      (img.headers.get("cache-control") || "").includes("max-age=604800")
+    );
+    const bytes = (await img.arrayBuffer()).byteLength;
+    check("...and actual file bytes in the body", bytes > 0);
+
+    img = await fetch(base + "/images/products/does-not-exist.webp");
+    check("a missing image → 404 (falls through to the JSON 404 handler)", img.status === 404);
+
+    // %2e%2e is an encoded "..". A plain "../" would be tidied away by fetch
+    // itself before it ever reached the server, so it wouldn't test anything.
+    img = await fetch(base + "/images/%2e%2e/app.js");
+    check("can't escape the images folder with ../ → not 200", img.status !== 200);
   } finally {
     console.error = originalError;
     if (failed > 0 && errorLog.length) {
