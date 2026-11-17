@@ -1234,6 +1234,7 @@ async function main() {
     console.log("\nTrust proxy: the IP the server sees");
     r = await req("GET", "/api/health/ip", { ip: "203.0.113.7" });
     check("GET /api/health/ip shows the visitor's IP from X-Forwarded-For", r.status === 200 && r.body.ip === "203.0.113.7");
+    check("...plus the raw forwarded chain and the hops setting, for checking Render", r.body.forwardedFor === "203.0.113.7" && r.body.trustProxyHops === 1);
     // express-rate-limit checks its own setup and prints a warning (an error
     // object with a code starting "ERR_ERL_") if something is wrong, e.g. the
     // IP handling. It keeps working, so a mistake would go unnoticed without
