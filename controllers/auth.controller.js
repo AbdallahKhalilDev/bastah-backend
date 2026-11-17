@@ -7,20 +7,68 @@ const User = require("../models/User");
 // zod describes exactly what a valid request body looks like. If the incoming
 // data doesn't match, we reject it early with a 400 — controllers below can
 // then trust the data is well-formed.
+//
+// Every text field has a MAXIMUM length too. Without one, anyone could store a
+// 100 KB "name" in our database. `.trim()` runs first, so "  Sara  " is saved as
+// "Sara" and a name made only of spaces counts as empty.
+
+// bcrypt (our password hasher) only looks at the first 72 BYTES of a password and
+// silently ignores the rest. So "a 100-character password" would really be a
+// 72-byte one, without the user ever knowing. We refuse longer passwords instead.
+// We count BYTES, not letters: an English letter is 1 byte, but an Arabic letter
+// is 2, so 72 bytes = 72 English letters, or 36 Arabic ones.
+const PASSWORD_MAX_BYTES = 72;
+
 const registerSchema = z.object({
-  name: z.string().min(1, "Name is required"),
-  email: z.string().email("A valid email is required"),
-  password: z.string().min(6, "Password must be at least 6 characters"),
-  phone: z.string().min(1, "Phone is required"),
+  name: z
+    .string()
+    .trim()
+    .min(1, "Name is required")
+    .max(100, "Name is too long (max 100 characters)"),
+  email: z
+    .string()
+    .trim()
+    .max(254, "Email is too long")
+    .email("A valid email is required"),
+  password: z
+    .string()
+    .min(6, "Password must be at least 6 characters")
+    .refine(
+      (p) => Buffer.byteLength(p, "utf8") <= PASSWORD_MAX_BYTES,
+      "Password is too long (max 72 English or 36 Arabic characters)"
+    ),
+  phone: z
+    .string()
+    .trim()
+    .min(1, "Phone is required")
+    .max(20, "Phone is too long (max 20 characters)"),
 });
 
 // For login we only need email + password. We keep the rules light on purpose:
 // login should not tell the user "password too short" — it just checks the
 // credentials and gives one generic answer either way (see below).
+// Note: NO 72-byte limit here. An account made before that limit existed may
+// have a longer password, and it must still be able to log in.
 const loginSchema = z.object({
-  email: z.string().email("A valid email is required"),
+  email: z
+    .string()
+    .trim()
+    .max(254, "Email is too long")
+    .email("A valid email is required"),
   password: z.string().min(1, "Password is required"),
 });
+
+// The ONE place a login token is made, so register and login can never drift
+// apart. The "payload" ({ id, role }) is data baked into the token; JWT_SECRET
+// signs it so nobody can forge or tamper with it. The client sends this token
+// back on future requests to prove who it is.
+function signToken(user) {
+  return jwt.sign(
+    { id: user._id, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN }
+  );
+}
 
 // Take a User document and return only the safe, public fields.
 // This guarantees we NEVER send the passwordHash back to the client.
@@ -58,9 +106,15 @@ async function register(req, res, next) {
   //    We store ONLY this hash, never the real password.
   const passwordHash = await bcrypt.hash(password, 10);
 
-  // 4. Create the user and respond 201 (Created) with the safe fields only.
+  // 4. Create the user. If two sign-ups with the same email arrive at the very
+  //    same moment, both can pass step 2 before either is saved. The database's
+  //    unique index then rejects the second one, and the central error handler
+  //    turns that into the same 409 as step 2 (see middleware/errorHandler.js).
   const user = await User.create({ name, email, phone, passwordHash });
-  res.status(201).json({ user: publicUser(user) });
+
+  // 5. Respond 201 (Created) with the safe fields AND a token, so the new user
+  //    is logged in straight away instead of having to log in a second time.
+  res.status(201).json({ user: publicUser(user), token: signToken(user) });
 }
 
 // POST /api/auth/login
@@ -89,16 +143,10 @@ async function login(req, res, next) {
     return next({ status: 401, message: "Invalid email or password" });
   }
 
-  // 4. Success: sign a JWT. The "payload" ({ id, role }) is data baked into
-  //    the token; JWT_SECRET signs it so nobody can forge or tamper with it.
-  //    The client sends this token back on future requests to prove identity.
-  const token = jwt.sign(
-    { id: user._id, role: user.role },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN }
-  );
-
-  res.json({ token });
+  // 4. Success: send the token AND the user's safe fields. With `user.role` in
+  //    the answer, the app knows at once which screens to open, with no second
+  //    request to /me.
+  res.json({ token: signToken(user), user: publicUser(user) });
 }
 
 // GET /api/auth/me  (protected by the `auth` middleware)

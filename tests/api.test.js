@@ -19,10 +19,13 @@
 process.env.MONGO_URI =
   process.env.TEST_MONGO_URI || "mongodb://127.0.0.1:27017/bastah_test";
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret";
+// Login and register really sign tokens, and signing fails without an expiry.
+process.env.JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
 
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const app = require("../app");
+const { missingEnv } = require("../config/env");
 
 const Category = require("../models/Category");
 const User = require("../models/User");
@@ -87,6 +90,9 @@ async function main() {
     Cart.init(),
     Order.init(),
     Area.init(),
+    // The unique email index must exist before the "two sign-ups at the same
+    // moment" test, or the database couldn't refuse the second one.
+    User.init(),
   ]);
 
   // --- seed data ---
@@ -160,9 +166,150 @@ async function main() {
   console.error = (...args) => errorLog.push(args);
 
   try {
+    let r;
+
+    // ================= Auth: startup settings check =================
+    console.log("\nRequired environment variables (config/env.js)");
+    check(
+      "nothing set → all three are reported missing",
+      missingEnv({}).join(",") === "MONGO_URI,JWT_SECRET,JWT_EXPIRES_IN"
+    );
+    check(
+      "an empty or blank value counts as missing",
+      missingEnv({ MONGO_URI: "x", JWT_SECRET: "  ", JWT_EXPIRES_IN: "" }).join(",") ===
+        "JWT_SECRET,JWT_EXPIRES_IN"
+    );
+    check(
+      "all three set → nothing missing",
+      missingEnv({ MONGO_URI: "x", JWT_SECRET: "y", JWT_EXPIRES_IN: "7d" }).length === 0
+    );
+
+    // ================= Auth: POST /api/auth/register =================
+    console.log("\nPOST /api/auth/register");
+    const signup = {
+      name: "  New Customer  ",
+      email: "  New.Customer@Test.com ",
+      password: "secret123",
+      phone: " 0599000000 ",
+    };
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, role: "admin" } });
+    check("valid sign-up → 201", r.status === 201);
+    check("...returns a token, so the new user is logged in at once", typeof r.body.token === "string");
+    check("...returns the user", r.body.user && r.body.user.id);
+    check("...as a customer, even though the body said role: admin", r.body.user.role === "customer");
+    check("...name and phone trimmed", r.body.user.name === "New Customer" && r.body.user.phone === "0599000000");
+    check("...email trimmed and lowercased", r.body.user.email === "new.customer@test.com");
+    check("...never exposes passwordHash", !("passwordHash" in r.body.user));
+    const signupToken = r.body.token;
+
+    r = await req("GET", "/api/auth/me", { token: signupToken });
+    check("the sign-up token works on /me → 200", r.status === 200);
+    check("...and belongs to the new user", r.body.user.email === "new.customer@test.com");
+
+    r = await req("POST", "/api/auth/register", {
+      body: { ...signup, email: "NEW.CUSTOMER@test.com" },
+    });
+    check("same email in different capitals → 409", r.status === 409);
+    check("...'Email already registered'", r.body.error === "Email already registered");
+
+    // Five sign-ups with ONE email, all sent at the same moment. Several pass the
+    // "is this email taken?" check before any is saved; the database's unique
+    // index refuses the rest. Exactly one must win, and the others must get a
+    // clean 409, never a 500.
+    const raceBodies = Array.from({ length: 5 }, () => ({
+      ...signup,
+      email: "race@test.com",
+    }));
+    const race = await Promise.all(
+      raceBodies.map((body) => req("POST", "/api/auth/register", { body }))
+    );
+    const raceStatuses = race.map((x) => x.status);
+    check("5 simultaneous sign-ups, one email → exactly one 201", raceStatuses.filter((s) => s === 201).length === 1);
+    check("...the other four → 409", raceStatuses.filter((s) => s === 409).length === 4);
+    check(
+      "...each 409 says 'Email already registered'",
+      race.filter((x) => x.status === 409).every((x) => x.body.error === "Email already registered")
+    );
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "short@test.com", password: "12345" } });
+    check("password under 6 characters → 400", r.status === 400);
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "long1@test.com", password: "a".repeat(73) } });
+    check("password of 73 English letters (73 bytes) → 400", r.status === 400);
+    check("...says it's too long", /too long/.test(r.body.error));
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "long2@test.com", password: "a".repeat(72) } });
+    check("password of exactly 72 English letters → 201", r.status === 201);
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "arabic1@test.com", password: "ب".repeat(37) } });
+    check("password of 37 Arabic letters (74 bytes) → 400", r.status === 400);
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "arabic2@test.com", password: "ب".repeat(36) } });
+    check("password of 36 Arabic letters (72 bytes) → 201", r.status === 201);
+
+    r = await req("POST", "/api/auth/login", { body: { email: "arabic2@test.com", password: "ب".repeat(36) } });
+    check("...and that Arabic password logs in → 200", r.status === 200);
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "name@test.com", name: "x".repeat(101) } });
+    check("name over 100 characters → 400", r.status === 400);
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "blank@test.com", name: "    " } });
+    check("name of only spaces → 400 'Name is required'", r.status === 400 && r.body.error === "Name is required");
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "phone@test.com", phone: "1".repeat(21) } });
+    check("phone over 20 characters → 400", r.status === 400);
+
+    r = await req("POST", "/api/auth/register", { body: { ...signup, email: "x".repeat(250) + "@t.co" } });
+    check("email over 254 characters → 400 'Email is too long'", r.status === 400 && r.body.error === "Email is too long");
+
+    r = await req("POST", "/api/auth/register", { body: { name: "No Phone", email: "nophone@test.com", password: "secret123" } });
+    check("missing phone → 400", r.status === 400);
+
+    // ================= Auth: POST /api/auth/login =================
+    console.log("\nPOST /api/auth/login");
+    r = await req("POST", "/api/auth/login", {
+      body: { email: "  NEW.customer@test.com ", password: "secret123" },
+    });
+    check("right password (email in any capitals, with spaces) → 200", r.status === 200);
+    check("...returns a token", typeof r.body.token === "string");
+    check("...returns the user with their role", r.body.user && r.body.user.role === "customer");
+    check("...never exposes passwordHash", !("passwordHash" in r.body.user));
+    const loginToken = r.body.token;
+
+    r = await req("GET", "/api/auth/me", { token: loginToken });
+    check("the login token works on /me → 200", r.status === 200);
+
+    const wrongPassword = await req("POST", "/api/auth/login", {
+      body: { email: "new.customer@test.com", password: "wrong-password" },
+    });
+    const unknownEmail = await req("POST", "/api/auth/login", {
+      body: { email: "nobody@test.com", password: "secret123" },
+    });
+    check("wrong password → 401", wrongPassword.status === 401);
+    check("unknown email → 401", unknownEmail.status === 401);
+    check(
+      "...both give the SAME message, so nobody can test which emails exist",
+      wrongPassword.body.error === "Invalid email or password" &&
+        unknownEmail.body.error === wrongPassword.body.error
+    );
+
+    r = await req("POST", "/api/auth/login", { body: { email: "new.customer@test.com" } });
+    check("missing password → 400", r.status === 400);
+
+    r = await req("POST", "/api/auth/login", { body: { email: "not-an-email", password: "secret123" } });
+    check("malformed email → 400", r.status === 400);
+
+    // ================= Auth: GET /api/auth/me =================
+    console.log("\nGET /api/auth/me");
+    r = await req("GET", "/api/auth/me");
+    check("no token → 401", r.status === 401);
+
+    r = await req("GET", "/api/auth/me", { token: "not-a-real-token" });
+    check("garbage token → 401", r.status === 401);
+
     // ================= Products: POST /api/products =================
     console.log("\nPOST /api/products");
-    let r;
 
     r = await req("POST", "/api/products", { body: { name: "x", nameAr: "x", category: FAKE_ID } });
     check("no token → 401", r.status === 401);
