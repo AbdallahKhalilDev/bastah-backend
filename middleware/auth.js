@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const { suspendedError } = require("../utils/accounts");
 
 // AUTHENTICATION middleware — answers "WHO are you?"
 //
@@ -38,8 +39,10 @@ async function auth(req, res, next) {
     // 3. NEW: look the account up in the DATABASE instead of trusting what the
     //    token says. A token is a snapshot from the moment of login and can be
     //    up to 7 days old; the database is the truth RIGHT NOW. This is one fast
-    //    lookup by _id, and we fetch only the two fields we need.
-    const user = await User.findById(payload.id).select("role tokenVersion");
+    //    lookup by _id, and we fetch only the fields we need.
+    const user = await User.findById(payload.id).select(
+      "role tokenVersion status statusReason"
+    );
 
     // 4. The account was deleted after the token was made → not valid any more.
     if (!user) {
@@ -58,7 +61,15 @@ async function auth(req, res, next) {
       });
     }
 
-    // 6. Attach a small, known shape. The role comes from the DATABASE, so a
+    // 6. An admin suspended this account → refused, even with a token that is
+    //    otherwise perfectly valid. Because we read the status on EVERY request,
+    //    a suspension counts at once, not when the token expires in 7 days.
+    //    403, not 401: we know exactly who this is; they're just not allowed in.
+    if (user.status === "suspended") {
+      return next(suspendedError(user));
+    }
+
+    // 7. Attach a small, known shape. The role comes from the DATABASE, so a
     //    role change counts on the very next request.
     req.user = { id: user._id.toString(), role: user.role };
     next();

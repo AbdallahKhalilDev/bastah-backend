@@ -1,3 +1,4 @@
+const bcrypt = require("bcrypt");
 const mongoose = require("mongoose");
 const { z } = require("zod");
 const User = require("../models/User");
@@ -5,7 +6,14 @@ const Shop = require("../models/Shop");
 const parsePagination = require("../utils/pagination");
 const escapeRegex = require("../utils/escapeRegex");
 const { signupShopSchema } = require("../utils/shopRules");
-const { ROLES, accountSchema, publicUser, createAccount } = require("../utils/accounts");
+const {
+  ROLES,
+  STATUSES,
+  accountSchema,
+  newPasswordRule,
+  publicUser,
+  createAccount,
+} = require("../utils/accounts");
 
 // Every route in this file is admin-only. That's enforced ONCE, in
 // routes/admin.routes.js (router.use(auth, requireRole("admin"))), so none of
@@ -21,9 +29,64 @@ const createUserSchema = accountSchema.extend({
   shop: signupShopSchema.optional(),
 });
 
-// GET /api/admin/users?role=&q=&page=&limit=
+// An admin edits someone's details: name, email, phone, with the same rules as
+// at sign-up. `.pick()` takes those three rules from accountSchema, `.partial()`
+// makes each optional (a PATCH changes only what you send). role / status /
+// password in the body are silently dropped: each has its own endpoint, or
+// (for role) none at all.
+const updateUserSchema = accountSchema
+  .pick({ name: true, email: true, phone: true })
+  .partial();
+
+// An admin sets a new password for someone. Same rules as any new password.
+const setPasswordSchema = z.object({ newPassword: newPasswordRule });
+
+// An admin switches an account off or back on. The reason is shown to the
+// user when they're refused, so it has a length limit like every text field.
+const setStatusSchema = z.object({
+  status: z.enum(STATUSES, { error: "Status must be active or suspended" }),
+  reason: z.string().trim().max(500, "Reason is too long (max 500 characters)").optional(),
+});
+
+// --- Shared helpers ------------------------------------------------------
+
+// What an ADMIN sees about an account: the public fields, plus the status
+// details (why and when it was suspended, and by which admin) that the user's
+// own screens don't need.
+function adminUser(user) {
+  return {
+    ...publicUser(user),
+    statusReason: user.statusReason,
+    statusChangedAt: user.statusChangedAt,
+    statusChangedBy: user.statusChangedBy,
+  };
+}
+
+// Loads the account named in the URL (/users/:id). Returns { problem } for a
+// malformed id (400) or an unknown one (404), otherwise { user }. Four
+// endpoints below need exactly this, so it's written once.
+async function loadUser(id) {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return { problem: { status: 400, message: "Invalid user id" } };
+  }
+  const user = await User.findById(id);
+  if (!user) {
+    return { problem: { status: 404, message: "User not found" } };
+  }
+  return { user };
+}
+
+// Is the admin acting on their OWN account? (Both ids as strings to compare.)
+function isSelf(req, user) {
+  return user._id.toString() === req.user.id;
+}
+
+// --- Endpoints -----------------------------------------------------------
+
+// GET /api/admin/users?role=&status=&q=&page=&limit=
 // Every account, newest first, paginated. Optional filters:
 //   ?role=customer|seller|admin   only that kind of account
+//   ?status=active|suspended      only accounts in that state
 //   ?q=text                       name, email or phone contains this text
 async function listUsers(req, res, next) {
   const { page, limit, skip } = parsePagination(req.query);
@@ -36,6 +99,19 @@ async function listUsers(req, res, next) {
       return next({ status: 400, message: "Invalid role" });
     }
     filter.role = req.query.role;
+  }
+
+  if (req.query.status) {
+    if (!STATUSES.includes(req.query.status)) {
+      return next({ status: 400, message: "Invalid status" });
+    }
+    // CAREFUL: accounts made before `status` existed have NOTHING stored.
+    // Mongoose fills in "active" when it LOADS a document, but a query filter
+    // runs inside MongoDB, which never sees that default. So "active" must
+    // mean "active OR not stored". In MongoDB, `null` also matches a field
+    // that is missing, so { $in: ["active", null] } says exactly that.
+    filter.status =
+      req.query.status === "active" ? { $in: ["active", null] } : req.query.status;
   }
 
   // Search: "contains", ignoring capitals. escapeRegex makes characters like
@@ -58,7 +134,7 @@ async function listUsers(req, res, next) {
     User.countDocuments(filter),
   ]);
 
-  res.json({ users: users.map(publicUser), page, limit, total });
+  res.json({ users: users.map(adminUser), page, limit, total });
 }
 
 // GET /api/admin/users/:id
@@ -66,13 +142,9 @@ async function listUsers(req, res, next) {
 // lists ALL their shops, including hidden ones (the public lists hide those),
 // so the admin sees everything that seller runs.
 async function getUser(req, res, next) {
-  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-    return next({ status: 400, message: "Invalid user id" });
-  }
-
-  const user = await User.findById(req.params.id).select("-passwordHash");
-  if (!user) {
-    return next({ status: 404, message: "User not found" });
+  const { problem, user } = await loadUser(req.params.id);
+  if (problem) {
+    return next(problem);
   }
 
   const shops =
@@ -82,7 +154,7 @@ async function getUser(req, res, next) {
           .sort({ createdAt: 1 })
       : [];
 
-  res.json({ user: publicUser(user), shops });
+  res.json({ user: adminUser(user), shops });
 }
 
 // POST /api/admin/users
@@ -112,7 +184,139 @@ async function createUser(req, res, next) {
   // 3. 201 with the new account (and the shop, or null). NO token: the admin
   //    stays logged in as themselves. The new person logs in on their own page
   //    with the password the admin gives them, and can then change it.
-  res.status(201).json({ user: publicUser(user), shop });
+  res.status(201).json({ user: adminUser(user), shop });
 }
 
-module.exports = { listUsers, getUser, createUser };
+// PATCH /api/admin/users/:id
+// An admin fixes someone's name, email and/or phone (any account, other admins
+// and themselves included). This is the ONLY way an email changes: users can't
+// change their own, because it's their login and we can't verify a new one.
+async function updateUser(req, res, next) {
+  const result = updateUserSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  const { problem, user } = await loadUser(req.params.id);
+  if (problem) {
+    return next(problem);
+  }
+
+  // A new email must not belong to ANOTHER account (one email = one account).
+  // `_id: { $ne: ... }` leaves this account itself out, so re-sending its own
+  // email (even in different capitals) is not a clash. If two admins race for
+  // the same email, the unique index still stops the second one (→ 409 from
+  // the central error handler).
+  if (data.email) {
+    const taken = await User.exists({
+      email: data.email.toLowerCase(),
+      _id: { $ne: user._id },
+    });
+    if (taken) {
+      return next({ status: 409, message: "Email already registered" });
+    }
+  }
+
+  // Changing the email does NOT log the user out: their tokens hold their id,
+  // not their email. From now on they log in with the new email.
+  Object.assign(user, data);
+  await user.save();
+
+  res.json({ user: adminUser(user) });
+}
+
+// PATCH /api/admin/users/:id/password
+// An admin sets a new password for someone, e.g. a user who forgot theirs.
+// Until the app can send emails or SMS, this IS "forgot password": the user
+// contacts an admin, the admin sets a temporary password and tells them, and
+// the user changes it from their account settings.
+async function setUserPassword(req, res, next) {
+  const result = setPasswordSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+
+  const { problem, user } = await loadUser(req.params.id);
+  if (problem) {
+    return next(problem);
+  }
+
+  // Your OWN password goes through PATCH /api/auth/me/password, which asks for
+  // the current one. Otherwise anyone who found an admin's unlocked laptop
+  // could change that admin's password without knowing it.
+  if (isSelf(req, user)) {
+    return next({
+      status: 403,
+      message: "Change your own password from your account settings",
+    });
+  }
+
+  // New hash, and +1 on the token counter: every device that user is logged in
+  // on is logged out (see tokenVersion in models/User.js). Useful when the
+  // reason for the reset is that someone else got into the account.
+  user.passwordHash = await bcrypt.hash(result.data.newPassword, 10);
+  user.tokenVersion += 1;
+  await user.save();
+
+  // No token here: this token would belong to the USER, not the admin.
+  res.json({ user: adminUser(user) });
+}
+
+// PATCH /api/admin/users/:id/status
+// An admin suspends an account, or switches it back on. Works for customers,
+// sellers AND other admins, but never on yourself: otherwise the last admin
+// could lock everyone out of the admin area for good.
+async function setUserStatus(req, res, next) {
+  const result = setStatusSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const { status, reason } = result.data;
+
+  // The user sees the reason when they're refused, so suspending needs one.
+  if (status === "suspended" && !reason) {
+    return next({ status: 400, message: "A reason is required to suspend an account" });
+  }
+
+  const { problem, user } = await loadUser(req.params.id);
+  if (problem) {
+    return next(problem);
+  }
+
+  if (isSelf(req, user)) {
+    return next({ status: 403, message: "You can't change your own status" });
+  }
+
+  // Already in that state → 409 (a "conflict" with the current state), the
+  // same idea as an illegal order status move. Most often it means two admins
+  // acted at once, and the screen just needs a refresh.
+  if (user.status === status) {
+    return next({ status: 409, message: `Account is already ${status}` });
+  }
+
+  // Record the change: the new state, the reason (cleared when switching the
+  // account back on), when, and which admin did it.
+  user.status = status;
+  user.statusReason = status === "suspended" ? reason : null;
+  user.statusChangedAt = new Date();
+  user.statusChangedBy = req.user.id;
+  await user.save();
+
+  // From the very next request, `auth` refuses this account (it reads the
+  // status every time). Its shops stay as they are; an admin can hide them
+  // with PATCH /api/shops/:id { isActive: false } if needed.
+  res.json({ user: adminUser(user) });
+}
+
+module.exports = {
+  listUsers,
+  getUser,
+  createUser,
+  updateUser,
+  setUserPassword,
+  setUserStatus,
+};

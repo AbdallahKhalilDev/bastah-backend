@@ -41,6 +41,38 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+
+    // --- Account status (set ONLY by an admin) ------------------------------
+    // "active" = can log in and use the app. "suspended" = blocked: login is
+    // refused, and every request with an existing token is refused too (the
+    // `auth` middleware reads this on every request). Nothing is deleted, so
+    // an admin can switch the account back on at any time.
+    //
+    // Like tokenVersion: accounts created before this field existed have
+    // nothing stored, and the default fills in "active" when they're loaded,
+    // so no migration script is needed.
+    status: {
+      type: String,
+      enum: ["active", "suspended"],
+      default: "active",
+    },
+    // The admin's reason for the suspension, shown to the user when they're
+    // refused. Cleared (back to null) when the account is switched back on.
+    statusReason: {
+      type: String,
+      default: null,
+    },
+    // WHEN the status last changed, and WHICH admin changed it. That's why
+    // every admin needs their own account rather than a shared one.
+    statusChangedAt: {
+      type: Date,
+      default: null,
+    },
+    statusChangedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   {
     // Mongoose auto-adds and maintains `createdAt` and `updatedAt` timestamps.

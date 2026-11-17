@@ -942,6 +942,212 @@ async function main() {
     run = await runCreateAdmin(["not-an-email", "Bad Email", "0599999999"]);
     check("an invalid email → refuses (same rules as sign-up)", run.code === 1 && run.stderr.includes("A valid email is required"));
 
+    // ================= Admin: PATCH /api/admin/users/:id (edit details) =================
+    console.log("\nPATCH /api/admin/users/:id (admin edits name, email, phone)");
+    r = await req("POST", "/api/auth/register", {
+      body: { name: "Target User", email: "target@test.com", password: "secret123", phone: "0599131313" },
+    });
+    const targetId = r.body.user.id;
+    let targetToken = r.body.token;
+    const madeAdmin = await User.findOne({ email: "made.admin@test.com" });
+    const portalSeller = await User.findOne({ email: "portal.seller@test.com" });
+
+    // The three new routes sit inside the guarded admin area too.
+    for (const [suffix, body] of [
+      ["", { name: "X" }],
+      ["/password", { newPassword: "hacked123" }],
+      ["/status", { status: "suspended", reason: "x" }],
+    ]) {
+      r = await req("PATCH", `/api/admin/users/${targetId}${suffix}`, { token: customerToken, body });
+      check(`PATCH /api/admin/users/:id${suffix} as a customer → 403`, r.status === 403);
+    }
+
+    r = await req("PATCH", "/api/admin/users/" + targetId, {
+      token: adminToken,
+      body: {
+        name: "  Target Renamed ",
+        email: " NEW.Target@test.com ",
+        phone: "0599141414",
+        role: "admin",
+        status: "suspended",
+        password: "hacked123",
+      },
+    });
+    check("admin edits name, email and phone → 200", r.status === 200);
+    check(
+      "...all three changed (trimmed, email lowercased)",
+      r.body.user?.name === "Target Renamed" && r.body.user?.email === "new.target@test.com" && r.body.user?.phone === "0599141414"
+    );
+    check(
+      "...role, status and password in the body are ignored",
+      r.body.user?.role === "customer" && r.body.user?.status === "active"
+    );
+
+    r = await req("POST", "/api/auth/login", { body: { email: "new.target@test.com", password: "secret123" } });
+    check("the user now logs in with the NEW email (same password) → 200", r.status === 200);
+    r = await req("POST", "/api/auth/login", { body: { email: "target@test.com", password: "secret123" } });
+    check("...the old email no longer works → 401", r.status === 401);
+    r = await req("GET", "/api/auth/me", { token: targetToken });
+    check("...and the email change did NOT log them out → 200", r.status === 200);
+
+    r = await req("PATCH", "/api/admin/users/" + targetId, { token: adminToken, body: { email: "customer@test.com" } });
+    check("an email that belongs to ANOTHER account → 409", r.status === 409 && r.body.error === "Email already registered");
+    r = await req("PATCH", "/api/admin/users/" + targetId, { token: adminToken, body: { email: "NEW.TARGET@test.com" } });
+    check("re-sending the account's OWN email (other capitals) → 200, not a clash", r.status === 200);
+    r = await req("PATCH", "/api/admin/users/" + targetId, { token: adminToken, body: { email: "not-an-email" } });
+    check("an invalid email → 400", r.status === 400);
+    r = await req("PATCH", "/api/admin/users/" + targetId, { token: adminToken, body: { name: "   " } });
+    check("a blank name → 400 'Name is required'", r.status === 400 && r.body.error === "Name is required");
+    r = await req("PATCH", "/api/admin/users/not-an-id", { token: adminToken, body: { name: "X" } });
+    check("malformed id → 400", r.status === 400 && r.body.error === "Invalid user id");
+    r = await req("PATCH", "/api/admin/users/" + FAKE_ID, { token: adminToken, body: { name: "X" } });
+    check("unknown id → 404", r.status === 404);
+    r = await req("PATCH", "/api/admin/users/" + madeAdmin._id, { token: adminToken, body: { name: "Renamed Admin" } });
+    check("an admin can edit ANOTHER admin → 200", r.status === 200 && r.body.user?.name === "Renamed Admin");
+
+    // ================= Admin: PATCH /api/admin/users/:id/password =================
+    console.log("\nPATCH /api/admin/users/:id/password (admin sets a new password)");
+    r = await req("POST", "/api/auth/login", { body: { email: "new.target@test.com", password: "secret123" } });
+    const targetSecondDevice = r.body.token;
+
+    r = await req("PATCH", `/api/admin/users/${targetId}/password`, { token: adminToken, body: { newPassword: "temp4567" } });
+    check("admin sets a new password → 200", r.status === 200);
+    check("...no token in the reply (it would be the user's, not the admin's)", !("token" in r.body));
+    r = await req("GET", "/api/auth/me", { token: targetToken });
+    check("...the user's old token → 401 (logged out everywhere)", r.status === 401);
+    r = await req("GET", "/api/auth/me", { token: targetSecondDevice });
+    check("...their second device too → 401", r.status === 401);
+    r = await req("POST", "/api/auth/login", { body: { email: "new.target@test.com", password: "secret123" } });
+    check("...the old password → 401", r.status === 401);
+    r = await req("POST", "/api/auth/login", { body: { email: "new.target@test.com", password: "temp4567" } });
+    check("...the new password → 200", r.status === 200);
+    targetToken = r.body.token;
+
+    r = await req("PATCH", `/api/admin/users/${targetId}/password`, { token: adminToken, body: { newPassword: "123" } });
+    check("a password under 6 characters → 400", r.status === 400);
+    r = await req("PATCH", `/api/admin/users/${targetId}/password`, { token: adminToken, body: {} });
+    check("no password → 400 'Password is required'", r.status === 400 && r.body.error === "Password is required");
+
+    r = await req("PATCH", `/api/admin/users/${admin._id}/password`, { token: adminToken, body: { newPassword: "mine12345" } });
+    check(
+      "an admin setting their OWN password here → 403",
+      r.status === 403 && r.body.error === "Change your own password from your account settings"
+    );
+
+    r = await req("PATCH", `/api/admin/users/${madeAdmin._id}/password`, { token: adminToken, body: { newPassword: "admin2pass" } });
+    check("setting ANOTHER admin's password → 200", r.status === 200);
+    r = await req("POST", "/api/auth/admin/login", { body: { email: "made.admin@test.com", password: "admin2pass" } });
+    check("...that admin logs in with it → 200", r.status === 200);
+    const madeAdminToken = r.body.token;
+
+    // ================= Admin: PATCH /api/admin/users/:id/status =================
+    console.log("\nPATCH /api/admin/users/:id/status (suspend / switch back on)");
+    r = await req("PATCH", `/api/admin/users/${targetId}/status`, { token: adminToken, body: { status: "suspended" } });
+    check("suspend without a reason → 400", r.status === 400 && r.body.error === "A reason is required to suspend an account");
+    r = await req("PATCH", `/api/admin/users/${targetId}/status`, { token: adminToken, body: { status: "suspended", reason: "   " } });
+    check("...a reason of only spaces counts as none → 400", r.status === 400);
+    r = await req("PATCH", `/api/admin/users/${targetId}/status`, { token: adminToken, body: { status: "banned", reason: "x" } });
+    check("an unknown status → 400 'Status must be active or suspended'", r.status === 400 && r.body.error === "Status must be active or suspended");
+    r = await req("PATCH", `/api/admin/users/${targetId}/status`, { token: adminToken, body: { status: "active" } });
+    check("switching ON an account that is already on → 409", r.status === 409 && r.body.error === "Account is already active");
+
+    r = await req("PATCH", `/api/admin/users/${targetId}/status`, {
+      token: adminToken,
+      body: { status: "suspended", reason: "Posting fake reviews" },
+    });
+    check("suspend with a reason → 200", r.status === 200 && r.body.user?.status === "suspended");
+    check("...the reason is saved", r.body.user?.statusReason === "Posting fake reviews");
+    check(
+      "...with WHEN and WHICH admin",
+      typeof r.body.user?.statusChangedAt === "string" && r.body.user?.statusChangedBy === admin._id.toString()
+    );
+
+    r = await req("GET", "/api/auth/me", { token: targetToken });
+    check("the suspended user's EXISTING token → 403", r.status === 403);
+    check("...code 'account_suspended'", r.body.code === "account_suspended");
+    check("...and the message shows the reason", r.body.error === "This account is suspended: Posting fake reviews");
+    r = await req("GET", "/api/cart", { token: targetToken });
+    check("...on every route, not only /me (the cart) → 403", r.status === 403 && r.body.code === "account_suspended");
+
+    r = await req("POST", "/api/auth/login", { body: { email: "new.target@test.com", password: "temp4567" } });
+    check("logging in, right password → 403 'account_suspended'", r.status === 403 && r.body.code === "account_suspended");
+    check("...with the reason and no token", r.body.error === "This account is suspended: Posting fake reviews" && !("token" in r.body));
+    r = await req("POST", "/api/auth/login", { body: { email: "new.target@test.com", password: "wrong-one" } });
+    check("logging in, WRONG password → the usual 401 (a stranger learns nothing)", r.status === 401 && !("code" in r.body));
+
+    r = await req("PATCH", `/api/admin/users/${targetId}/status`, { token: adminToken, body: { status: "suspended", reason: "again" } });
+    check("suspending it again → 409 'Account is already suspended'", r.status === 409 && r.body.error === "Account is already suspended");
+
+    r = await req("GET", "/api/admin/users/" + targetId, { token: adminToken });
+    check("the admin's user details show the status and the reason", r.body.user?.status === "suspended" && r.body.user?.statusReason === "Posting fake reviews");
+
+    // ?status= on the admin list. An account saved before `status` existed has
+    // NOTHING stored; it must still count as active.
+    await User.collection.insertOne({
+      name: "No Status Stored",
+      email: "nostatus@test.com",
+      phone: "0599000003",
+      role: "customer",
+      passwordHash: realHash,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    check(
+      "(setup) the old-style account really has no status stored",
+      (await User.collection.findOne({ email: "nostatus@test.com" })).status === undefined
+    );
+    r = await req("GET", "/api/admin/users?status=suspended", { token: adminToken });
+    check(
+      "?status=suspended → only suspended accounts, including ours",
+      r.status === 200 && r.body.users.every((u) => u.status === "suspended") && r.body.users.some((u) => u.id === targetId)
+    );
+    r = await req("GET", "/api/admin/users?status=active&q=nostatus", { token: adminToken });
+    check("?status=active also finds an account with NO status stored", r.body.total === 1 && r.body.users[0].status === "active");
+    r = await req("GET", "/api/admin/users?status=active", { token: adminToken });
+    check("?status=active never lists a suspended account", r.body.users.every((u) => u.status === "active"));
+    r = await req("GET", "/api/admin/users?status=banned", { token: adminToken });
+    check("?status=banned → 400 'Invalid status'", r.status === 400 && r.body.error === "Invalid status");
+
+    r = await req("PATCH", `/api/admin/users/${targetId}/status`, { token: adminToken, body: { status: "active" } });
+    check("switch the account back on → 200", r.status === 200 && r.body.user?.status === "active");
+    check("...the reason is cleared", r.body.user?.statusReason === null);
+    r = await req("GET", "/api/auth/me", { token: targetToken });
+    check("...their SAME token works again (suspending paused the account)", r.status === 200);
+    r = await req("POST", "/api/auth/login", { body: { email: "new.target@test.com", password: "temp4567" } });
+    check("...and they can log in again → 200", r.status === 200);
+
+    r = await req("PATCH", `/api/admin/users/${admin._id}/status`, { token: adminToken, body: { status: "suspended", reason: "x" } });
+    check("an admin suspending THEMSELVES → 403", r.status === 403 && r.body.error === "You can't change your own status");
+
+    // Sellers and other admins can be suspended too.
+    r = await req("PATCH", `/api/admin/users/${portalSeller._id}/status`, {
+      token: adminToken,
+      body: { status: "suspended", reason: "Fake prices" },
+    });
+    check("suspend a SELLER → 200", r.status === 200);
+    r = await req("GET", "/api/orders/incoming", { token: portalTokens.seller });
+    check("...their seller pages are refused → 403 account_suspended", r.status === 403 && r.body.code === "account_suspended");
+    r = await req("PATCH", `/api/admin/users/${portalSeller._id}/status`, { token: adminToken, body: { status: "active" } });
+    r = await req("GET", "/api/orders/incoming", { token: portalTokens.seller });
+    check("...switched back on → 200 again", r.status === 200);
+
+    r = await req("PATCH", `/api/admin/users/${madeAdmin._id}/status`, {
+      token: adminToken,
+      body: { status: "suspended", reason: "Left the team" },
+    });
+    check("suspend ANOTHER admin → 200", r.status === 200);
+    r = await req("GET", "/api/admin/users", { token: madeAdminToken });
+    check("...they're locked out of the admin area → 403 account_suspended", r.status === 403 && r.body.code === "account_suspended");
+    r = await req("PATCH", `/api/admin/users/${madeAdmin._id}/status`, { token: adminToken, body: { status: "active" } });
+    check("...switched back on → 200", r.status === 200);
+
+    const noStatus = await User.findOne({ email: "nostatus@test.com" });
+    r = await req("PATCH", `/api/admin/users/${noStatus._id}/status`, {
+      token: adminToken,
+      body: { status: "suspended", reason: "Spam" },
+    });
+    check("an account with NO status stored can be suspended (it counts as active) → 200", r.status === 200);
+
     // ================= Products: POST /api/products =================
     console.log("\nPOST /api/products");
 

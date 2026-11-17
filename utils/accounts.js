@@ -18,6 +18,9 @@ const { checkCategory } = require("./shopRules");
 // The three kinds of account (must match the enum in models/User.js).
 const ROLES = ["customer", "seller", "admin"];
 
+// The two account statuses (must match the enum in models/User.js).
+const STATUSES = ["active", "suspended"];
+
 // --- Input rules ---------------------------------------------------------
 // Every text field has a MAXIMUM length. Without one, anyone could store a
 // 100 KB "name" in our database. `.trim()` runs first, so "  Sara  " is saved as
@@ -90,7 +93,25 @@ function publicUser(user) {
     email: user.email,
     phone: user.phone,
     role: user.role,
+    status: user.status,
     createdAt: user.createdAt,
+  };
+}
+
+// The error for a suspended account, used by BOTH places that refuse one: the
+// login (controllers/auth.controller.js) and every request with an existing
+// token (middleware/auth.js). One shared function, so both say exactly the
+// same thing.
+//   403 = "I know who you are, but you're not allowed in."
+//   code "account_suspended" lets the app show its own (Arabic) text and log
+//   the user out, instead of matching our English sentence.
+function suspendedError(user) {
+  return {
+    status: 403,
+    message: user.statusReason
+      ? `This account is suspended: ${user.statusReason}`
+      : "This account is suspended",
+    code: "account_suspended",
   };
 }
 
@@ -165,9 +186,11 @@ async function createAccount({ name, email, phone, password, role, shop: shopDat
 
 module.exports = {
   ROLES,
+  STATUSES,
   newPasswordRule,
   accountSchema,
   signToken,
   publicUser,
+  suspendedError,
   createAccount,
 };

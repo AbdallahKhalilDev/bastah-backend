@@ -7,6 +7,7 @@ const {
   newPasswordRule,
   signToken,
   publicUser,
+  suspendedError,
   createAccount,
 } = require("../utils/accounts");
 
@@ -166,7 +167,14 @@ function loginAs(role) {
       });
     }
 
-    // 5. Success: send the token AND the user's safe fields. With `user.role`
+    // 5. An admin suspended this account → no token. Like step 4, this comes
+    //    after the password check, so only the real owner ever learns that the
+    //    account is suspended, and why.
+    if (user.status === "suspended") {
+      return next(suspendedError(user));
+    }
+
+    // 6. Success: send the token AND the user's safe fields. With `user.role`
     //    in the answer, the app knows at once which screens to open, with no
     //    second request to /me.
     res.json({ token: signToken(user), user: publicUser(user) });
