@@ -22,6 +22,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret";
 // Login and register really sign tokens, and signing fails without an expiry.
 process.env.JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
 
+const path = require("path");
+const { execFile } = require("child_process");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
@@ -774,6 +776,171 @@ async function main() {
     const liarToken = jwt.sign({ id: customer._id, role: "admin" }, process.env.JWT_SECRET);
     r = await req("GET", "/api/orders/incoming", { token: liarToken });
     check("a token saying 'admin' for a customer account → 403 (the database wins)", r.status === 403);
+
+    // ================= Admin: the whole /api/admin area is guarded =================
+    console.log("\n/api/admin: admins only (router-level guard)");
+    const adminRoutes = [
+      ["GET", "/api/admin/users"],
+      ["GET", "/api/admin/users/" + customer._id],
+      ["POST", "/api/admin/users"],
+    ];
+    for (const [method, url] of adminRoutes) {
+      r = await req(method, url, { body: method === "POST" ? {} : undefined });
+      check(`${method} ${url.replace(String(customer._id), ":id")}, no token → 401`, r.status === 401);
+      r = await req(method, url, { token: customerToken, body: method === "POST" ? {} : undefined });
+      check("...customer → 403", r.status === 403);
+      r = await req(method, url, { token: sellerToken, body: method === "POST" ? {} : undefined });
+      check("...seller → 403", r.status === 403);
+    }
+    r = await req("GET", "/api/admin/does-not-exist", { token: customerToken });
+    check("a made-up admin path, as a customer → 403 (outsiders can't map the admin area)", r.status === 403);
+    r = await req("GET", "/api/admin/does-not-exist", { token: adminToken });
+    check("...the same path as an admin → 404", r.status === 404);
+
+    // ================= Admin: GET /api/admin/users =================
+    console.log("\nGET /api/admin/users (list, filter, search)");
+    r = await req("GET", "/api/admin/users", { token: adminToken });
+    check("admin → 200 with users, page, limit, total", r.status === 200 && Array.isArray(r.body.users) && r.body.page === 1);
+    check("...total = every account in the database", r.body.total === (await User.countDocuments()));
+    check("...no passwordHash anywhere", r.body.users.every((u) => !("passwordHash" in u)));
+    check(
+      "...newest first",
+      r.body.users.every((u, i, all) => i === 0 || new Date(all[i - 1].createdAt) >= new Date(u.createdAt))
+    );
+
+    r = await req("GET", "/api/admin/users?role=seller", { token: adminToken });
+    check("?role=seller → only sellers", r.status === 200 && r.body.users.every((u) => u.role === "seller"));
+    check("...total = number of sellers", r.body.total === (await User.countDocuments({ role: "seller" })));
+
+    r = await req("GET", "/api/admin/users?role=superuser", { token: adminToken });
+    check("?role=superuser → 400 'Invalid role'", r.status === 400 && r.body.error === "Invalid role");
+
+    r = await req("GET", "/api/admin/users?q=PORTAL", { token: adminToken });
+    const portalEmails = (r.body.users || []).map((u) => u.email).sort().join(",");
+    check(
+      "?q=PORTAL → finds the portal seller and admin (any capitals)",
+      portalEmails === "portal.admin@test.com,portal.seller@test.com"
+    );
+
+    r = await req("GET", "/api/admin/users?q=0599111111", { token: adminToken });
+    check("?q=<phone number> → finds that account by phone", r.body.users?.length === 1 && r.body.users[0].email === "portal.seller@test.com");
+
+    r = await req("GET", "/api/admin/users?q=portal&role=admin", { token: adminToken });
+    check("?q + ?role together → only the portal admin", r.body.total === 1 && r.body.users[0].role === "admin");
+
+    r = await req("GET", "/api/admin/users?q=" + encodeURIComponent("("), { token: adminToken });
+    check("?q=( does not crash (search text is escaped) → 200", r.status === 200);
+
+    r = await req("GET", "/api/admin/users?limit=2&page=2", { token: adminToken });
+    check("?limit=2&page=2 → the second page of 2", r.status === 200 && r.body.page === 2 && r.body.limit === 2 && r.body.users.length === 2);
+
+    // ================= Admin: GET /api/admin/users/:id =================
+    console.log("\nGET /api/admin/users/:id");
+    r = await req("GET", "/api/admin/users/not-an-id", { token: adminToken });
+    check("malformed id → 400 'Invalid user id'", r.status === 400 && r.body.error === "Invalid user id");
+    r = await req("GET", "/api/admin/users/" + FAKE_ID, { token: adminToken });
+    check("unknown id → 404 'User not found'", r.status === 404 && r.body.error === "User not found");
+
+    r = await req("GET", "/api/admin/users/" + customer._id, { token: adminToken });
+    check("a customer → 200 with the user and an empty shops list", r.status === 200 && r.body.user?.email === "customer@test.com" && r.body.shops?.length === 0);
+    check("...no passwordHash", !("passwordHash" in r.body.user));
+
+    r = await req("GET", "/api/admin/users/" + seller._id, { token: adminToken });
+    check(
+      "a seller → ALL their shops",
+      r.status === 200 && r.body.shops?.length === (await Shop.countDocuments({ owner: seller._id }))
+    );
+    check("...including the hidden one the public can't see", r.body.shops.some((s) => s.name === "Hidden Shop" && s.isActive === false));
+
+    // ================= Admin: POST /api/admin/users =================
+    console.log("\nPOST /api/admin/users (admin creates accounts)");
+    const adminMade = { name: "Made By Admin", password: "secret123", phone: "0599121212" };
+
+    r = await req("POST", "/api/admin/users", {
+      token: adminToken,
+      body: { ...adminMade, email: "made.customer@test.com", role: "customer", shop: { name: "Ignored Shop" } },
+    });
+    check("create a customer → 201", r.status === 201 && r.body.user?.role === "customer");
+    check("...no token in the reply (the admin stays logged in as themselves)", !("token" in r.body));
+    check("...a shop sent for a customer is ignored", r.body.shop === null && !(await Shop.exists({ name: "Ignored Shop" })));
+    r = await req("POST", "/api/auth/login", { body: { email: "made.customer@test.com", password: "secret123" } });
+    check("...the new customer logs in on the customer page → 200", r.status === 200);
+
+    r = await req("POST", "/api/admin/users", {
+      token: adminToken,
+      body: { ...adminMade, email: "made.admin@test.com", role: "admin" },
+    });
+    check("create an admin → 201", r.status === 201 && r.body.user?.role === "admin");
+    r = await req("POST", "/api/auth/admin/login", { body: { email: "made.admin@test.com", password: "secret123" } });
+    check("...the new admin logs in on the admin page → 200", r.status === 200);
+    r = await req("GET", "/api/admin/users", { token: r.body.token });
+    check("...and can use the admin area at once → 200", r.status === 200);
+
+    r = await req("POST", "/api/admin/users", {
+      token: adminToken,
+      body: { ...adminMade, email: "made.seller@test.com", role: "seller", shop: { name: "Admin Made Market", area: "Rimal" } },
+    });
+    check("create a seller with a shop → 201", r.status === 201 && r.body.user?.role === "seller");
+    check("...the shop is owned by the NEW seller, not the admin", r.body.shop?.owner === r.body.user?.id);
+    check("...shop phone left out → the seller's phone", r.body.shop?.phone === "0599121212");
+    r = await req("POST", "/api/auth/seller/login", { body: { email: "made.seller@test.com", password: "secret123" } });
+    check("...the new seller logs in on the seller page → 200", r.status === 200);
+
+    r = await req("POST", "/api/admin/users", {
+      token: adminToken,
+      body: { ...adminMade, email: "shopless.seller@test.com", role: "seller" },
+    });
+    check("a seller WITHOUT a shop → 400 'Shop details are required'", r.status === 400 && r.body.error === "Shop details are required");
+    check("...and no account was created", !(await User.exists({ email: "shopless.seller@test.com" })));
+
+    r = await req("POST", "/api/admin/users", { token: adminToken, body: { ...adminMade, email: "norole@test.com" } });
+    check("no role → 400 'Role must be customer, seller or admin'", r.status === 400 && r.body.error === "Role must be customer, seller or admin");
+    r = await req("POST", "/api/admin/users", { token: adminToken, body: { ...adminMade, email: "norole@test.com", role: "superuser" } });
+    check("an unknown role → 400", r.status === 400);
+
+    r = await req("POST", "/api/admin/users", { token: adminToken, body: { ...adminMade, email: "made.customer@test.com", role: "customer" } });
+    check("an email already in use → 409", r.status === 409 && r.body.error === "Email already registered");
+
+    r = await req("POST", "/api/admin/users", { token: adminToken, body: { ...adminMade, email: "weak@test.com", role: "customer", password: "123" } });
+    check("a password under 6 characters → 400 (same rules as sign-up)", r.status === 400);
+
+    // Tidy up the shop this section created, so later tests see the shops they expect.
+    await Shop.deleteMany({ name: "Admin Made Market" });
+
+    // ================= The create-admin script =================
+    // It runs as a SEPARATE program, exactly like `npm run create-admin`, against
+    // the same test database (it inherits our MONGO_URI).
+    console.log("\nnpm run create-admin (the script)");
+    const runCreateAdmin = (args) =>
+      new Promise((resolve) => {
+        execFile(
+          process.execPath,
+          [path.join(__dirname, "..", "scripts", "createAdmin.js"), ...args],
+          { env: process.env },
+          (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })
+        );
+      });
+
+    let run = await runCreateAdmin(["first.admin@test.com", "First Admin", "0599999999"]);
+    check("creates an admin → exits OK", run.code === 0);
+    check("...says which database it wrote to", run.stdout.includes('"bastah_test"'));
+    const printedPassword = (run.stdout.match(/Password:\s*(\S+)/) || [])[1];
+    check("...prints a password", typeof printedPassword === "string" && printedPassword.length >= 16);
+    r = await req("POST", "/api/auth/admin/login", { body: { email: "first.admin@test.com", password: printedPassword } });
+    check("...and that password logs in on the admin page → 200", r.status === 200 && r.body.user?.role === "admin");
+
+    run = await runCreateAdmin(["first.admin@test.com", "First Admin", "0599999999"]);
+    check("same email again → refuses (exit code 1)", run.code === 1 && run.stderr.includes("already exists"));
+
+    run = await runCreateAdmin(["customer@test.com", "Sneaky", "0599999999"]);
+    check("an existing CUSTOMER's email → refuses", run.code === 1);
+    check("...and that customer is still a customer", (await User.findById(customer._id)).role === "customer");
+
+    run = await runCreateAdmin(["only-an-email@test.com"]);
+    check("missing name/phone → refuses with the usage line", run.code === 1 && run.stderr.includes("Usage"));
+
+    run = await runCreateAdmin(["not-an-email", "Bad Email", "0599999999"]);
+    check("an invalid email → refuses (same rules as sign-up)", run.code === 1 && run.stderr.includes("A valid email is required"));
 
     // ================= Products: POST /api/products =================
     console.log("\nPOST /api/products");

@@ -13,7 +13,8 @@
     "seed:areas": "node seed/areas.seed.js",
     "seed:delivery-zones": "node seed/deliveryZones.seed.js",
     "seed:product-images": "node seed/productImages.seed.js",
-    "set-role": "node scripts/setRole.js"
+    "set-role": "node scripts/setRole.js",
+    "create-admin": "node scripts/createAdmin.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

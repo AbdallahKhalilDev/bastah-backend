@@ -1,64 +1,30 @@
 const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
 const { z } = require("zod");
 const User = require("../models/User");
-const Shop = require("../models/Shop");
-const { signupShopSchema, checkCategory } = require("../utils/shopRules");
+const { signupShopSchema } = require("../utils/shopRules");
+const {
+  accountSchema,
+  newPasswordRule,
+  signToken,
+  publicUser,
+  createAccount,
+} = require("../utils/accounts");
 
 // --- Input validation ---------------------------------------------------
 // zod describes exactly what a valid request body looks like. If the incoming
 // data doesn't match, we reject it early with a 400 — controllers below can
 // then trust the data is well-formed.
 //
-// Every text field has a MAXIMUM length too. Without one, anyone could store a
-// 100 KB "name" in our database. `.trim()` runs first, so "  Sara  " is saved as
-// "Sara" and a name made only of spaces counts as empty.
-
-// bcrypt (our password hasher) only looks at the first 72 BYTES of a password and
-// silently ignores the rest. So "a 100-character password" would really be a
-// 72-byte one, without the user ever knowing. We refuse longer passwords instead.
-// We count BYTES, not letters: an English letter is 1 byte, but an Arabic letter
-// is 2, so 72 bytes = 72 English letters, or 36 Arabic ones.
-const PASSWORD_MAX_BYTES = 72;
-
-// `{ error: "..." }` on z.string() is the message for a field that is MISSING
-// altogether (without it, zod says "Invalid input: expected string, received
-// undefined"). The message in .min(1, "...") is for one that is present but empty.
-
-// The rules for ONE new password, used by sign-up and by "change my password".
-const newPasswordRule = z
-  .string({ error: "Password is required" })
-  .min(6, "Password must be at least 6 characters")
-  .refine(
-    (p) => Buffer.byteLength(p, "utf8") <= PASSWORD_MAX_BYTES,
-    "Password is too long (max 72 English or 36 Arabic characters)"
-  );
-
-const registerSchema = z.object({
-  name: z
-    .string({ error: "Name is required" })
-    .trim()
-    .min(1, "Name is required")
-    .max(100, "Name is too long (max 100 characters)"),
-  email: z
-    .string({ error: "Email is required" })
-    .trim()
-    .max(254, "Email is too long")
-    .email("A valid email is required"),
-  password: newPasswordRule,
-  phone: z
-    .string({ error: "Phone is required" })
-    .trim()
-    .min(1, "Phone is required")
-    .max(20, "Phone is too long (max 20 characters)"),
-});
+// The rules for a NEW account (accountSchema: name, email, password, phone) live
+// in utils/accounts.js, because admins create accounts too (admin.controller.js)
+// and both must follow the very same rules.
 
 // PATCH /api/auth/me: a user may change their name and phone. `.pick()` takes
-// just those two rules from registerSchema (so the limits stay identical), and
+// just those two rules from accountSchema (so the limits stay identical), and
 // `.partial()` makes both optional, because a PATCH changes only what you send.
 // Email and role are NOT in this whitelist, so they're silently dropped: the
 // email is the login id, and the role never changes.
-const updateMeSchema = registerSchema.pick({ name: true, phone: true }).partial();
+const updateMeSchema = accountSchema.pick({ name: true, phone: true }).partial();
 
 // PATCH /api/auth/me/password. The current password is only compared with the
 // stored hash, so it gets no length rules (an older account may have a longer
@@ -71,10 +37,10 @@ const changePasswordSchema = z.object({
 });
 
 // Seller sign-up = the SAME account fields as a customer, plus a `shop` object
-// holding their first shop. `.extend()` copies registerSchema and adds the extra
+// holding their first shop. `.extend()` copies accountSchema and adds the extra
 // key, so the account rules exist in one place only. The shop part follows the
 // shared shop rules (utils/shopRules.js).
-const registerSellerSchema = registerSchema.extend({
+const registerSellerSchema = accountSchema.extend({
   shop: signupShopSchema,
 });
 
@@ -94,64 +60,25 @@ const loginSchema = z.object({
     .min(1, "Password is required"),
 });
 
-// The ONE place a login token is made, so register, login and "change my
-// password" can never drift apart. The "payload" is data baked into the token;
-// JWT_SECRET signs it so nobody can forge or tamper with it. The client sends
-// this token back on future requests to prove who it is.
-//
-// tokenVersion is the account's counter at this moment (see models/User.js).
-// The `auth` middleware compares it with the account's CURRENT counter.
-function signToken(user) {
-  return jwt.sign(
-    { id: user._id, role: user.role, tokenVersion: user.tokenVersion },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN }
-  );
-}
-
-// Take a User document and return only the safe, public fields.
-// This guarantees we NEVER send the passwordHash back to the client.
-function publicUser(user) {
-  return {
-    id: user._id,
-    name: user.name,
-    email: user.email,
-    phone: user.phone,
-    role: user.role,
-    createdAt: user.createdAt,
-  };
-}
-
-// POST /api/auth/register
+// POST /api/auth/register  (a customer signs up)
 async function register(req, res, next) {
   // 1. Validate the body. `safeParse` doesn't throw — it returns success/error
-  //    so we can craft our own 400 response with a readable message.
-  const result = registerSchema.safeParse(req.body);
+  //    so we can craft our own 400 response with a readable message. A `role`
+  //    in the body is silently dropped: this URL always makes a customer.
+  const result = accountSchema.safeParse(req.body);
   if (!result.success) {
     const message = result.error.issues[0].message;
     return next({ status: 400, message });
   }
-  const { name, email, password, phone } = result.data;
 
-  // 2. Reject duplicate emails. (email is stored lowercased, so lowercase here
-  //    too before checking.)
-  const existing = await User.findOne({ email: email.toLowerCase() });
-  if (existing) {
-    return next({ status: 409, message: "Email already registered" });
+  // 2. Create the account the one shared way (utils/accounts.js): it checks
+  //    the email is free, hashes the password, and saves.
+  const { problem, user } = await createAccount({ ...result.data, role: "customer" });
+  if (problem) {
+    return next(problem);
   }
 
-  // 3. Hash the password. bcrypt turns "mypassword" into a one-way scrambled
-  //    string; 10 is the "salt rounds" (how much work the hash takes).
-  //    We store ONLY this hash, never the real password.
-  const passwordHash = await bcrypt.hash(password, 10);
-
-  // 4. Create the user. If two sign-ups with the same email arrive at the very
-  //    same moment, both can pass step 2 before either is saved. The database's
-  //    unique index then rejects the second one, and the central error handler
-  //    turns that into the same 409 as step 2 (see middleware/errorHandler.js).
-  const user = await User.create({ name, email, phone, passwordHash });
-
-  // 5. Respond 201 (Created) with the safe fields AND a token, so the new user
+  // 3. Respond 201 (Created) with the safe fields AND a token, so the new user
   //    is logged in straight away instead of having to log in a second time.
   res.status(201).json({ user: publicUser(user), token: signToken(user) });
 }
@@ -160,12 +87,6 @@ async function register(req, res, next) {
 // A new seller signs up AND creates their first shop in one form, so they can
 // enter the shop's location and details right away instead of in a second step.
 // More shops can be added later from the dashboard (POST /api/shops).
-//
-// The big rule here: NEVER leave a seller without the shop they filled in.
-// We have no database transactions (see the checkout notes in
-// order.controller.js), so we use the same approach as checkout: check
-// EVERYTHING first, and only start saving once nothing can be wrong with the
-// input.
 async function registerSeller(req, res, next) {
   // 1. Validate the account fields AND the shop fields together. Any problem in
   //    either → 400 before anything is saved. Unknown keys (role, and owner /
@@ -175,47 +96,16 @@ async function registerSeller(req, res, next) {
     const message = result.error.issues[0].message;
     return next({ status: 400, message });
   }
-  const { name, email, password, phone, shop: shopData } = result.data;
 
-  // 2. If a shop category was chosen, it must be a real one (the same shared
-  //    check POST /api/shops uses).
-  const categoryProblem = await checkCategory(shopData.category);
-  if (categoryProblem) {
-    return next({ status: 400, message: categoryProblem });
+  // 2. Create the seller AND their shop the one shared way (utils/accounts.js).
+  //    It checks everything before saving anything, and never leaves a seller
+  //    without their shop.
+  const { problem, user, shop } = await createAccount({ ...result.data, role: "seller" });
+  if (problem) {
+    return next(problem);
   }
 
-  // 3. Email already used (by ANY account: one email = one account) → 409.
-  const existing = await User.findOne({ email: email.toLowerCase() });
-  if (existing) {
-    return next({ status: 409, message: "Email already registered" });
-  }
-
-  // 4. Everything checked. Now save, user first (the shop needs the user's id
-  //    as its owner). The role is set HERE, never taken from the body.
-  const passwordHash = await bcrypt.hash(password, 10);
-  const user = await User.create({ name, email, phone, passwordHash, role: "seller" });
-
-  // 5. Create the shop. If the seller left the shop phone out, it uses their
-  //    own phone. (`??` means "only if it's missing", unlike `||`.)
-  //
-  //    If saving the shop STILL fails (say the database drops at this exact
-  //    moment), we delete the user we just made, then let the error continue
-  //    to the error handler. Without this, the email would be taken by a
-  //    seller with no shop, and the person couldn't even try again. This
-  //    "undo step 4 by hand" is our stand-in for a transaction.
-  let shop;
-  try {
-    shop = await Shop.create({
-      ...shopData,
-      phone: shopData.phone ?? phone,
-      owner: user._id,
-    });
-  } catch (err) {
-    await User.deleteOne({ _id: user._id });
-    throw err;
-  }
-
-  // 6. 201 with the user, a token (they're logged in at once, like customers),
+  // 3. 201 with the user, a token (they're logged in at once, like customers),
   //    and the new shop, so the dashboard can open straight onto it.
   res.status(201).json({ user: publicUser(user), token: signToken(user), shop });
 }
@@ -368,5 +258,4 @@ module.exports = {
   me,
   updateMe,
   changePassword,
-  publicUser,
 };

@@ -48,6 +48,11 @@ const userSchema = new mongoose.Schema(
   }
 );
 
+// For the admin's user list: "all sellers, newest first" is answered straight
+// from this index instead of reading every user. (The list without a role filter
+// is newest-first too; with few accounts that's fast either way.)
+userSchema.index({ role: 1, createdAt: -1 });
+
 // A "model" is the tool we use to actually read/write Users in the database.
 // Mongoose will use the collection named "users" (lowercased + pluralized).
 module.exports = mongoose.model("User", userSchema);
