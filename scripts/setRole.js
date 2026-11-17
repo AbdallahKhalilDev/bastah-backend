@@ -54,7 +54,10 @@ async function setRole() {
     console.error(`No user found with email "${email}". Did you register them?`);
   } else {
     console.log(`Set role of ${email} to "${role}".`);
-    console.log("Reminder: that user must LOG IN AGAIN to get a fresh token.");
+    // The server reads the role from the database on every request (see
+    // middleware/auth.js), so no new token is needed. But each role has its own
+    // login page, so the NEXT login must happen on the page for the new role.
+    console.log("It counts right away. Next time, they log in on the page for that role.");
   }
 
   await mongoose.disconnect();

@@ -30,6 +30,17 @@ const userSchema = new mongoose.Schema(
       enum: ["customer", "seller", "admin"], // only these 3 values are allowed
       default: "customer", // new users are customers unless told otherwise
     },
+    // A counter that lets us cancel all of this account's existing login tokens.
+    // Every token carries the number that was here when it was made. Changing
+    // the password adds 1, so every OLDER token now carries the wrong number and
+    // the `auth` middleware refuses it: "log out everywhere".
+    //
+    // Accounts created before this field existed have nothing stored, and the
+    // default fills in 0 when they're loaded, so they need no migration.
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     // Mongoose auto-adds and maintains `createdAt` and `updatedAt` timestamps.

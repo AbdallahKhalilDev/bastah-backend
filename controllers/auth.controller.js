@@ -21,29 +21,53 @@ const { signupShopSchema, checkCategory } = require("../utils/shopRules");
 // is 2, so 72 bytes = 72 English letters, or 36 Arabic ones.
 const PASSWORD_MAX_BYTES = 72;
 
+// `{ error: "..." }` on z.string() is the message for a field that is MISSING
+// altogether (without it, zod says "Invalid input: expected string, received
+// undefined"). The message in .min(1, "...") is for one that is present but empty.
+
+// The rules for ONE new password, used by sign-up and by "change my password".
+const newPasswordRule = z
+  .string({ error: "Password is required" })
+  .min(6, "Password must be at least 6 characters")
+  .refine(
+    (p) => Buffer.byteLength(p, "utf8") <= PASSWORD_MAX_BYTES,
+    "Password is too long (max 72 English or 36 Arabic characters)"
+  );
+
 const registerSchema = z.object({
   name: z
-    .string()
+    .string({ error: "Name is required" })
     .trim()
     .min(1, "Name is required")
     .max(100, "Name is too long (max 100 characters)"),
   email: z
-    .string()
+    .string({ error: "Email is required" })
     .trim()
     .max(254, "Email is too long")
     .email("A valid email is required"),
-  password: z
-    .string()
-    .min(6, "Password must be at least 6 characters")
-    .refine(
-      (p) => Buffer.byteLength(p, "utf8") <= PASSWORD_MAX_BYTES,
-      "Password is too long (max 72 English or 36 Arabic characters)"
-    ),
+  password: newPasswordRule,
   phone: z
-    .string()
+    .string({ error: "Phone is required" })
     .trim()
     .min(1, "Phone is required")
     .max(20, "Phone is too long (max 20 characters)"),
+});
+
+// PATCH /api/auth/me: a user may change their name and phone. `.pick()` takes
+// just those two rules from registerSchema (so the limits stay identical), and
+// `.partial()` makes both optional, because a PATCH changes only what you send.
+// Email and role are NOT in this whitelist, so they're silently dropped: the
+// email is the login id, and the role never changes.
+const updateMeSchema = registerSchema.pick({ name: true, phone: true }).partial();
+
+// PATCH /api/auth/me/password. The current password is only compared with the
+// stored hash, so it gets no length rules (an older account may have a longer
+// one). The new password follows the same rules as at sign-up.
+const changePasswordSchema = z.object({
+  currentPassword: z
+    .string({ error: "Current password is required" })
+    .min(1, "Current password is required"),
+  newPassword: newPasswordRule,
 });
 
 // Seller sign-up = the SAME account fields as a customer, plus a `shop` object
@@ -61,20 +85,25 @@ const registerSellerSchema = registerSchema.extend({
 // have a longer password, and it must still be able to log in.
 const loginSchema = z.object({
   email: z
-    .string()
+    .string({ error: "Email is required" })
     .trim()
     .max(254, "Email is too long")
     .email("A valid email is required"),
-  password: z.string().min(1, "Password is required"),
+  password: z
+    .string({ error: "Password is required" })
+    .min(1, "Password is required"),
 });
 
-// The ONE place a login token is made, so register and login can never drift
-// apart. The "payload" ({ id, role }) is data baked into the token; JWT_SECRET
-// signs it so nobody can forge or tamper with it. The client sends this token
-// back on future requests to prove who it is.
+// The ONE place a login token is made, so register, login and "change my
+// password" can never drift apart. The "payload" is data baked into the token;
+// JWT_SECRET signs it so nobody can forge or tamper with it. The client sends
+// this token back on future requests to prove who it is.
+//
+// tokenVersion is the account's counter at this moment (see models/User.js).
+// The `auth` middleware compares it with the account's CURRENT counter.
 function signToken(user) {
   return jwt.sign(
-    { id: user._id, role: user.role },
+    { id: user._id, role: user.role, tokenVersion: user.tokenVersion },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN }
   );
@@ -268,4 +297,76 @@ async function me(req, res, next) {
   res.json({ user: publicUser(user) });
 }
 
-module.exports = { register, registerSeller, loginAs, me, publicUser };
+// PATCH /api/auth/me  (any logged-in user: customer, seller or admin)
+// Change your own name and/or phone. Only the fields you send change.
+async function updateMe(req, res, next) {
+  // 1. Validate against the whitelist. email / role / passwordHash in the body
+  //    are silently dropped, so this can never change them.
+  const result = updateMeSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+
+  // 2. Load the account. `auth` has just checked it exists, but it could be
+  //    deleted between the two lookups, so we still handle "not found".
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return next({ status: 404, message: "User not found" });
+  }
+
+  // 3. Copy the validated fields on and save. An empty body changes nothing
+  //    and simply returns the account as it is.
+  Object.assign(user, result.data);
+  await user.save();
+
+  res.json({ user: publicUser(user) });
+}
+
+// PATCH /api/auth/me/password  (any logged-in user)
+// Change your own password. You must know the current one: a token alone isn't
+// enough, so someone who picks up an unlocked phone can't lock the owner out.
+async function changePassword(req, res, next) {
+  // 1. Validate the body.
+  const result = changePasswordSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const { currentPassword, newPassword } = result.data;
+
+  // 2. Load the account (same "not found" note as updateMe).
+  const user = await User.findById(req.user.id);
+  if (!user) {
+    return next({ status: 404, message: "User not found" });
+  }
+
+  // 3. Check the current password. Wrong → 400, NOT 401. A 401 means "your
+  //    session is invalid", and the app would react by logging the user out,
+  //    when all they did was mistype a password in a form.
+  const currentMatches = await bcrypt.compare(currentPassword, user.passwordHash);
+  if (!currentMatches) {
+    return next({ status: 400, message: "Current password is incorrect" });
+  }
+
+  // 4. Save the new hash and add 1 to the token counter. Every token issued
+  //    before this moment now carries the old number, so `auth` refuses it:
+  //    every other phone or browser is logged out.
+  user.passwordHash = await bcrypt.hash(newPassword, 10);
+  user.tokenVersion += 1;
+  await user.save();
+
+  // 5. Send back a FRESH token carrying the new number, so the device that made
+  //    the change stays logged in. The app must replace its stored token.
+  res.json({ token: signToken(user), user: publicUser(user) });
+}
+
+module.exports = {
+  register,
+  registerSeller,
+  loginAs,
+  me,
+  updateMe,
+  changePassword,
+  publicUser,
+};

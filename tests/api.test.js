@@ -599,6 +599,182 @@ async function main() {
     const signupIds = (await User.find({ email: { $in: signupEmails } }).select("_id")).map((u) => u._id);
     await Shop.deleteMany({ owner: { $in: signupIds } });
 
+    // ================= Friendly messages for missing fields =================
+    console.log("\nFriendly messages when a field is missing");
+    r = await req("POST", "/api/auth/login", { body: {} });
+    check("login with nothing → 400 'Email is required'", r.status === 400 && r.body.error === "Email is required");
+    r = await req("POST", "/api/auth/login", { body: { email: "a@test.com" } });
+    check("login without password → 400 'Password is required'", r.status === 400 && r.body.error === "Password is required");
+    r = await req("POST", "/api/auth/register", { body: {} });
+    check("sign-up with nothing → 400 'Name is required'", r.status === 400 && r.body.error === "Name is required");
+    r = await req("POST", "/api/auth/register", { body: { name: "X" } });
+    check("sign-up without email → 400 'Email is required'", r.status === 400 && r.body.error === "Email is required");
+
+    // ================= My account: PATCH /api/auth/me =================
+    console.log("\nPATCH /api/auth/me (edit my name and phone)");
+    r = await req("POST", "/api/auth/register", {
+      body: { name: "Me User", email: "me.user@test.com", password: "secret123", phone: "0599444444" },
+    });
+    const meToken = r.body.token;
+
+    r = await req("PATCH", "/api/auth/me", {
+      token: meToken,
+      body: { name: "  Me Renamed  ", phone: " 0599555555 ", email: "hijack@test.com", role: "admin" },
+    });
+    check("change name and phone → 200", r.status === 200);
+    check("...name trimmed and updated", r.body.user?.name === "Me Renamed");
+    check("...phone trimmed and updated", r.body.user?.phone === "0599555555");
+    check("...email NOT changed (not allowed here)", r.body.user?.email === "me.user@test.com");
+    check("...role NOT changed", r.body.user?.role === "customer");
+
+    r = await req("GET", "/api/auth/me", { token: meToken });
+    check("GET /me shows the new name (it was really saved)", r.body.user?.name === "Me Renamed");
+
+    r = await req("PATCH", "/api/auth/me", { token: meToken, body: { phone: "0599666666" } });
+    check(
+      "only phone sent → phone changes, name stays",
+      r.status === 200 && r.body.user?.name === "Me Renamed" && r.body.user?.phone === "0599666666"
+    );
+
+    r = await req("PATCH", "/api/auth/me", { token: meToken, body: {} });
+    check("empty body → 200, nothing changes", r.status === 200 && r.body.user?.name === "Me Renamed");
+
+    r = await req("PATCH", "/api/auth/me", { token: meToken, body: { name: "   " } });
+    check("blank name → 400 'Name is required'", r.status === 400 && r.body.error === "Name is required");
+
+    r = await req("PATCH", "/api/auth/me", { token: meToken, body: { phone: "1".repeat(21) } });
+    check("phone over 20 characters → 400", r.status === 400);
+
+    r = await req("PATCH", "/api/auth/me", { body: { name: "X" } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("PATCH", "/api/auth/me", { token: portalTokens.seller, body: { name: "Portal Seller Renamed" } });
+    check("works for a seller too → 200", r.status === 200 && r.body.user?.name === "Portal Seller Renamed");
+    r = await req("PATCH", "/api/auth/me", { token: portalTokens.admin, body: { phone: "0599888888" } });
+    check("...and for an admin → 200", r.status === 200 && r.body.user?.phone === "0599888888");
+
+    // ================= My account: PATCH /api/auth/me/password =================
+    console.log("\nPATCH /api/auth/me/password (change my password)");
+    // The same account is ALSO logged in on a second device, say a laptop.
+    r = await req("POST", "/api/auth/login", { body: { email: "me.user@test.com", password: "secret123" } });
+    const laptopToken = r.body.token;
+
+    r = await req("PATCH", "/api/auth/me/password", {
+      token: meToken,
+      body: { currentPassword: "wrong-one", newPassword: "newsecret456" },
+    });
+    check(
+      "wrong current password → 400 'Current password is incorrect' (not 401)",
+      r.status === 400 && r.body.error === "Current password is incorrect"
+    );
+    r = await req("GET", "/api/auth/me", { token: meToken });
+    check("...and the user is still logged in after the failed attempt", r.status === 200);
+
+    r = await req("PATCH", "/api/auth/me/password", { token: meToken, body: { newPassword: "newsecret456" } });
+    check("missing current password → 400 'Current password is required'", r.status === 400 && r.body.error === "Current password is required");
+
+    r = await req("PATCH", "/api/auth/me/password", { token: meToken, body: { currentPassword: "secret123", newPassword: "123" } });
+    check("new password under 6 characters → 400", r.status === 400 && r.body.error === "Password must be at least 6 characters");
+
+    r = await req("PATCH", "/api/auth/me/password", { token: meToken, body: { currentPassword: "secret123", newPassword: "a".repeat(73) } });
+    check("new password over 72 bytes → 400", r.status === 400 && /too long/.test(r.body.error));
+
+    r = await req("PATCH", "/api/auth/me/password", { body: { currentPassword: "secret123", newPassword: "newsecret456" } });
+    check("no token → 401", r.status === 401);
+
+    r = await req("PATCH", "/api/auth/me/password", {
+      token: meToken,
+      body: { currentPassword: "secret123", newPassword: "newsecret456" },
+    });
+    check("right current password → 200", r.status === 200);
+    check("...returns a fresh token", typeof r.body.token === "string" && r.body.token !== meToken);
+    const freshToken = r.body.token;
+
+    r = await req("GET", "/api/auth/me", { token: freshToken });
+    check("the fresh token works → 200 (this device stays logged in)", r.status === 200);
+    r = await req("GET", "/api/auth/me", { token: meToken });
+    check("the OLD token of this device → 401", r.status === 401);
+    check(
+      "...'Your password was changed. Please log in again'",
+      r.body.error === "Your password was changed. Please log in again"
+    );
+    r = await req("GET", "/api/auth/me", { token: laptopToken });
+    check("the laptop's token → 401 too (logged out everywhere)", r.status === 401);
+
+    r = await req("POST", "/api/auth/login", { body: { email: "me.user@test.com", password: "secret123" } });
+    check("the old password no longer logs in → 401", r.status === 401);
+    r = await req("POST", "/api/auth/login", { body: { email: "me.user@test.com", password: "newsecret456" } });
+    check("the new password logs in → 200", r.status === 200);
+
+    r = await req("PATCH", "/api/auth/me/password", {
+      token: freshToken,
+      body: { currentPassword: "newsecret456", newPassword: "third789" },
+    });
+    check("changing it a second time → 200", r.status === 200);
+    const thirdToken = r.body.token;
+    r = await req("GET", "/api/auth/me", { token: freshToken });
+    check("...the token from the first change stops working too → 401", r.status === 401);
+    r = await req("GET", "/api/auth/me", { token: thirdToken });
+    check("...the newest token works → 200", r.status === 200);
+
+    // ================= auth: the database is the truth, not the token =================
+    console.log("\nauth middleware reads the account from the database");
+
+    // Tokens made BEFORE this update carry no tokenVersion. They must keep
+    // working, or every user of the live app would be logged out at deploy.
+    // (tokenFor() makes exactly that kind of token.)
+    r = await req("GET", "/api/auth/me", { token: tokenFor(customer) });
+    check("a token made before this update (no counter inside) still works → 200", r.status === 200);
+
+    // An account saved before tokenVersion existed has NOTHING stored for it.
+    // insertOne goes straight to MongoDB, skipping Mongoose's defaults, exactly
+    // like the accounts already in Atlas.
+    await User.collection.insertOne({
+      name: "Old Account",
+      email: "old.account@test.com",
+      phone: "0599000002",
+      role: "customer",
+      passwordHash: realHash,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    r = await req("POST", "/api/auth/login", { body: { email: "old.account@test.com", password: "secret123" } });
+    check("an account from before this update logs in → 200", r.status === 200);
+    const oldAccountToken = r.body.token;
+    r = await req("GET", "/api/auth/me", { token: oldAccountToken });
+    check("...its token works → 200", r.status === 200);
+    r = await req("PATCH", "/api/auth/me/password", {
+      token: oldAccountToken,
+      body: { currentPassword: "secret123", newPassword: "newsecret456" },
+    });
+    check("...and it can change its password (the counter starts from 0) → 200", r.status === 200);
+    r = await req("GET", "/api/auth/me", { token: r.body.token });
+    check("...with a working fresh token → 200", r.status === 200);
+
+    // The account is deleted while its token is still valid.
+    const doomed = await User.create({ name: "Doomed", email: "doomed@test.com", passwordHash: "x", role: "customer" });
+    const doomedToken = tokenFor(doomed);
+    r = await req("GET", "/api/auth/me", { token: doomedToken });
+    check("token works while the account exists → 200", r.status === 200);
+    await User.deleteOne({ _id: doomed._id });
+    r = await req("GET", "/api/auth/me", { token: doomedToken });
+    check("...account deleted → the same token gets 401", r.status === 401);
+
+    // The role is read from the database, so a change counts at once.
+    const promoted = await User.create({ name: "Promoted", email: "promoted@test.com", passwordHash: "x", role: "customer" });
+    const promotedToken = tokenFor(promoted); // the token says "customer"
+    r = await req("GET", "/api/orders/incoming", { token: promotedToken });
+    check("a customer on a seller-only route → 403", r.status === 403);
+    await User.updateOne({ _id: promoted._id }, { role: "seller" });
+    r = await req("GET", "/api/orders/incoming", { token: promotedToken });
+    check("...role changed to seller in the database → the SAME token now gets 200", r.status === 200);
+
+    // A token that claims a role the account doesn't have. (Only someone with
+    // our secret could make one, but it shows the database wins.)
+    const liarToken = jwt.sign({ id: customer._id, role: "admin" }, process.env.JWT_SECRET);
+    r = await req("GET", "/api/orders/incoming", { token: liarToken });
+    check("a token saying 'admin' for a customer account → 403 (the database wins)", r.status === 403);
+
     // ================= Products: POST /api/products =================
     console.log("\nPOST /api/products");
 

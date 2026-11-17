@@ -6,6 +6,8 @@ const {
   registerSeller,
   loginAs,
   me,
+  updateMe,
+  changePassword,
 } = require("../controllers/auth.controller");
 
 const router = express.Router();
@@ -32,5 +34,9 @@ router.post("/admin/login", asyncHandler(loginAs("admin")));
 // past it (otherwise 401), and it sets req.user for the `me` controller to use.
 // Every role uses this same /me.
 router.get("/me", auth, asyncHandler(me));
+
+// "My account" settings, for every role: edit my name/phone, change my password.
+router.patch("/me", auth, asyncHandler(updateMe));
+router.patch("/me/password", auth, asyncHandler(changePassword));
 
 module.exports = router;
