@@ -2,6 +2,8 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { z } = require("zod");
 const User = require("../models/User");
+const Shop = require("../models/Shop");
+const { signupShopSchema, checkCategory } = require("../utils/shopRules");
 
 // --- Input validation ---------------------------------------------------
 // zod describes exactly what a valid request body looks like. If the incoming
@@ -42,6 +44,14 @@ const registerSchema = z.object({
     .trim()
     .min(1, "Phone is required")
     .max(20, "Phone is too long (max 20 characters)"),
+});
+
+// Seller sign-up = the SAME account fields as a customer, plus a `shop` object
+// holding their first shop. `.extend()` copies registerSchema and adds the extra
+// key, so the account rules exist in one place only. The shop part follows the
+// shared shop rules (utils/shopRules.js).
+const registerSellerSchema = registerSchema.extend({
+  shop: signupShopSchema,
 });
 
 // For login we only need email + password. We keep the rules light on purpose:
@@ -115,6 +125,70 @@ async function register(req, res, next) {
   // 5. Respond 201 (Created) with the safe fields AND a token, so the new user
   //    is logged in straight away instead of having to log in a second time.
   res.status(201).json({ user: publicUser(user), token: signToken(user) });
+}
+
+// POST /api/auth/seller/register
+// A new seller signs up AND creates their first shop in one form, so they can
+// enter the shop's location and details right away instead of in a second step.
+// More shops can be added later from the dashboard (POST /api/shops).
+//
+// The big rule here: NEVER leave a seller without the shop they filled in.
+// We have no database transactions (see the checkout notes in
+// order.controller.js), so we use the same approach as checkout: check
+// EVERYTHING first, and only start saving once nothing can be wrong with the
+// input.
+async function registerSeller(req, res, next) {
+  // 1. Validate the account fields AND the shop fields together. Any problem in
+  //    either → 400 before anything is saved. Unknown keys (role, and owner /
+  //    isVerified / ratingAvg / isActive inside `shop`) are silently dropped.
+  const result = registerSellerSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const { name, email, password, phone, shop: shopData } = result.data;
+
+  // 2. If a shop category was chosen, it must be a real one (the same shared
+  //    check POST /api/shops uses).
+  const categoryProblem = await checkCategory(shopData.category);
+  if (categoryProblem) {
+    return next({ status: 400, message: categoryProblem });
+  }
+
+  // 3. Email already used (by ANY account: one email = one account) → 409.
+  const existing = await User.findOne({ email: email.toLowerCase() });
+  if (existing) {
+    return next({ status: 409, message: "Email already registered" });
+  }
+
+  // 4. Everything checked. Now save, user first (the shop needs the user's id
+  //    as its owner). The role is set HERE, never taken from the body.
+  const passwordHash = await bcrypt.hash(password, 10);
+  const user = await User.create({ name, email, phone, passwordHash, role: "seller" });
+
+  // 5. Create the shop. If the seller left the shop phone out, it uses their
+  //    own phone. (`??` means "only if it's missing", unlike `||`.)
+  //
+  //    If saving the shop STILL fails (say the database drops at this exact
+  //    moment), we delete the user we just made, then let the error continue
+  //    to the error handler. Without this, the email would be taken by a
+  //    seller with no shop, and the person couldn't even try again. This
+  //    "undo step 4 by hand" is our stand-in for a transaction.
+  let shop;
+  try {
+    shop = await Shop.create({
+      ...shopData,
+      phone: shopData.phone ?? phone,
+      owner: user._id,
+    });
+  } catch (err) {
+    await User.deleteOne({ _id: user._id });
+    throw err;
+  }
+
+  // 6. 201 with the user, a token (they're logged in at once, like customers),
+  //    and the new shop, so the dashboard can open straight onto it.
+  res.status(201).json({ user: publicUser(user), token: signToken(user), shop });
 }
 
 // The LOGIN FACTORY — one login logic, one endpoint per login page.
@@ -194,4 +268,4 @@ async function me(req, res, next) {
   res.json({ user: publicUser(user) });
 }
 
-module.exports = { register, loginAs, me, publicUser };
+module.exports = { register, registerSeller, loginAs, me, publicUser };

@@ -1,7 +1,6 @@
 const mongoose = require("mongoose");
 const { z } = require("zod");
 const Shop = require("../models/Shop");
-const Category = require("../models/Category");
 const Area = require("../models/Area");
 const homeQueries = require("../utils/homeQueries");
 
@@ -10,38 +9,16 @@ const homeQueries = require("../utils/homeQueries");
 const ZONE_POPULATE = { path: "deliveryZones.area", select: "name nameAr slug" };
 
 // --- Input validation ---------------------------------------------------
-// zod describes exactly what a valid "create shop" body looks like. It is a
-// WHITELIST: only these keys are accepted. By default zod *strips* any other key
-// it doesn't know about, so if a client sneaks in owner / isVerified / ratingAvg
-// / ratingCount, those are silently dropped and can never reach the database.
-// That's how we keep the system-controlled fields safe. `owner` is set from the
-// login token, not the body (see createShop below).
-const createShopSchema = z.object({
-  name: z.string().min(1, "Name is required"),
-  phone: z.string().min(1, "Phone is required"),
-  area: z.string().optional(),
-  address: z.string().optional(),
-  description: z.string().optional(),
-  logoUrl: z.string().optional(),
-  category: z.string().optional(),
-  isActive: z.boolean().optional(),
-});
-
-// The "update shop" body uses the SAME whitelist as create, but EVERY field is
-// optional — a PATCH changes only the fields you send and leaves the rest alone.
-// name/phone are still min(1) *when present*, so you can't blank them out. As
-// with create, unknown keys (owner, isVerified, ratingAvg, ratingCount) are
-// stripped, so this endpoint can never change the system-controlled fields.
-const updateShopSchema = z.object({
-  name: z.string().min(1, "Name cannot be empty").optional(),
-  phone: z.string().min(1, "Phone cannot be empty").optional(),
-  area: z.string().optional(),
-  address: z.string().optional(),
-  description: z.string().optional(),
-  logoUrl: z.string().optional(),
-  category: z.string().optional(),
-  isActive: z.boolean().optional(),
-});
+// The rules for a shop's fields (createShopSchema, updateShopSchema) and the
+// category check live in utils/shopRules.js. Seller sign-up creates a shop too,
+// and with one shared set of rules the two can't drift apart. Both schemas are
+// WHITELISTS: owner / isVerified / ratingAvg / ratingCount are silently dropped,
+// so they can never reach the database. `owner` comes from the login token.
+const {
+  createShopSchema,
+  updateShopSchema,
+  checkCategory,
+} = require("../utils/shopRules");
 
 // The whitelist for SETTING a shop's delivery zones. This is the first
 // zod-validated ARRAY in the codebase, so a couple of notes:
@@ -146,18 +123,12 @@ async function createShop(req, res, next) {
   }
   const data = result.data;
 
-  // 2. If a category was provided, make sure it's real. First check the id is
-  //    well-formed (else Mongoose would throw a CastError), then that a Category
-  //    with that id actually exists. Both problems are the caller's bad input,
-  //    so both are a 400. When category is omitted we skip this entirely.
-  if (data.category) {
-    if (!mongoose.Types.ObjectId.isValid(data.category)) {
-      return next({ status: 400, message: "Invalid category id" });
-    }
-    const category = await Category.findById(data.category);
-    if (!category) {
-      return next({ status: 400, message: "Category not found" });
-    }
+  // 2. If a category was provided, make sure it's a real one (the shared check
+  //    in utils/shopRules.js). A bad or unknown category is the caller's bad
+  //    input, so it's a 400. When category is omitted the check passes.
+  const categoryProblem = await checkCategory(data.category);
+  if (categoryProblem) {
+    return next({ status: 400, message: categoryProblem });
   }
 
   // 3. Create the shop. CRITICAL: owner comes from the verified token
@@ -206,16 +177,11 @@ async function updateShop(req, res, next) {
   }
   const data = result.data;
 
-  // 5. If they're changing the category, verify the new one exists (same check
-  //    as create). Omitting category leaves the current one untouched.
-  if (data.category) {
-    if (!mongoose.Types.ObjectId.isValid(data.category)) {
-      return next({ status: 400, message: "Invalid category id" });
-    }
-    const category = await Category.findById(data.category);
-    if (!category) {
-      return next({ status: 400, message: "Category not found" });
-    }
+  // 5. If they're changing the category, verify the new one exists (same shared
+  //    check as create). Omitting category leaves the current one untouched.
+  const categoryProblem = await checkCategory(data.category);
+  if (categoryProblem) {
+    return next({ status: 400, message: categoryProblem });
   }
 
   // 6. Copy the validated fields onto the loaded document, then save. save()

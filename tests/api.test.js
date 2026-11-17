@@ -414,6 +414,191 @@ async function main() {
     check("a Node error with its own code (database down) → 500", fr.statusCode === 500);
     check("...and its internal code is NOT sent to the user", !("code" in fr.body));
 
+    // ================= Seller sign-up, with the first shop =================
+    console.log("\nPOST /api/auth/seller/register (seller + first shop)");
+    const sellerSignup = {
+      name: "  Ahmad Seller ",
+      email: "ahmad.seller@test.com",
+      password: "secret123",
+      phone: "0599333333",
+      shop: {
+        name: "  Ahmad Market  ",
+        area: "Rimal",
+        address: "Omar Al-Mukhtar St.",
+        description: "Fresh vegetables",
+      },
+    };
+    // Every email this section signs up with, so we can tidy up at the end.
+    const signupEmails = [
+      "ahmad.seller@test.com",
+      "own.phone@test.com",
+      "no.shop@test.com",
+      "unlucky@test.com",
+    ];
+    const noAccount = async (email) => !(await User.exists({ email }));
+
+    // A sneaky body: it tries to pick the role, the shop's owner, a verified
+    // badge, a perfect rating, and to start the shop hidden. All must be ignored.
+    r = await req("POST", "/api/auth/seller/register", {
+      body: {
+        ...sellerSignup,
+        role: "admin",
+        shop: {
+          ...sellerSignup.shop,
+          owner: seller._id.toString(),
+          isVerified: true,
+          ratingAvg: 5,
+          ratingCount: 99,
+          isActive: false,
+        },
+      },
+    });
+    check("valid seller sign-up → 201", r.status === 201);
+    check("...the account is a seller (role: admin in the body ignored)", r.body.user?.role === "seller");
+    check("...with a token, so they're logged in at once", typeof r.body.token === "string");
+    check("...never exposes passwordHash", r.body.user && !("passwordHash" in r.body.user));
+    const newShop = r.body.shop || {};
+    const newSellerToken = r.body.token;
+    check("...returns the new shop, name trimmed", newShop.name === "Ahmad Market");
+    check("...owned by the NEW seller (owner in the body ignored)", newShop.owner === r.body.user?.id);
+    check(
+      "...area, address and description saved",
+      newShop.area === "Rimal" && newShop.address === "Omar Al-Mukhtar St." && newShop.description === "Fresh vegetables"
+    );
+    check("...no shop phone sent → the shop uses the seller's phone", newShop.phone === "0599333333");
+    check("...active (isActive: false in the body ignored)", newShop.isActive === true);
+    check(
+      "...not verified, no rating (body values ignored)",
+      newShop.isVerified === false && newShop.ratingAvg === 0 && newShop.ratingCount === 0
+    );
+
+    r = await req("GET", "/api/shops/" + newShop._id);
+    check("the new shop is public right away (GET /api/shops/:id → 200)", r.status === 200);
+
+    r = await req("POST", "/api/auth/seller/login", {
+      body: { email: "ahmad.seller@test.com", password: "secret123" },
+    });
+    check("the new seller logs in on the seller page → 200", r.status === 200);
+    r = await req("POST", "/api/auth/login", {
+      body: { email: "ahmad.seller@test.com", password: "secret123" },
+    });
+    check("...and the customer page refuses them → 403 wrong_portal", r.status === 403 && r.body.code === "wrong_portal");
+
+    r = await req("PATCH", "/api/shops/" + newShop._id, {
+      token: newSellerToken,
+      body: { description: "Fresh fruit too" },
+    });
+    check(
+      "the sign-up token can edit the new shop (they own it) → 200",
+      r.status === 200 && r.body.shop?.description === "Fresh fruit too"
+    );
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: {
+        ...sellerSignup,
+        email: "own.phone@test.com",
+        shop: { name: "Own Phone Shop", phone: "082000000", category: category._id.toString() },
+      },
+    });
+    check("shop with its own phone → 201, and the shop keeps that phone", r.status === 201 && r.body.shop?.phone === "082000000");
+    check("...the chosen category is saved", r.body.shop?.category === category._id.toString());
+
+    // --- Anything wrong → 400/409, and NOTHING is saved ---
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "no.shop@test.com", shop: undefined },
+    });
+    check("no shop at all → 400 'Shop details are required'", r.status === 400 && r.body.error === "Shop details are required");
+    check("...and NO account was created", await noAccount("no.shop@test.com"));
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "no.shop@test.com", shop: { area: "Rimal" } },
+    });
+    check("shop without a name → 400 'Shop name is required'", r.status === 400 && r.body.error === "Shop name is required");
+    check("...and NO account was created", await noAccount("no.shop@test.com"));
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "no.shop@test.com", shop: { name: "    " } },
+    });
+    check("shop name of only spaces → 400 'Shop name is required'", r.status === 400 && r.body.error === "Shop name is required");
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "no.shop@test.com", shop: { name: "X", description: "d".repeat(1001) } },
+    });
+    check("shop description over 1000 characters → 400", r.status === 400 && /Description is too long/.test(r.body.error));
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "no.shop@test.com", shop: { name: "X", category: "abc" } },
+    });
+    check("malformed category id → 400 'Invalid category id'", r.status === 400 && r.body.error === "Invalid category id");
+    check("...and NO account was created", await noAccount("no.shop@test.com"));
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "no.shop@test.com", shop: { name: "X", category: FAKE_ID } },
+    });
+    check("category that doesn't exist → 400 'Category not found'", r.status === 400 && r.body.error === "Category not found");
+    check("...and NO account was created", await noAccount("no.shop@test.com"));
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "no.shop@test.com", password: "123" },
+    });
+    check("account problem (password too short) → 400", r.status === 400);
+    check("...and NO account was created", await noAccount("no.shop@test.com"));
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "new.customer@test.com", shop: { name: "Should Not Exist" } },
+    });
+    check("email already used (by a customer) → 409", r.status === 409 && r.body.error === "Email already registered");
+    check("...and NO shop was created", !(await Shop.exists({ name: "Should Not Exist" })));
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "no.shop@test.com" },
+    });
+    check("after all those failures, the same email signs up fine → 201", r.status === 201);
+
+    // --- The safety net: the shop save fails AFTER the account was saved ---
+    // We can't make the real database fail on cue, so for one request we swap
+    // Shop.create for a function that always fails, then put the real one back.
+    const realShopCreate = Shop.create;
+    Shop.create = async () => {
+      throw new Error("simulated database failure");
+    };
+    try {
+      r = await req("POST", "/api/auth/seller/register", {
+        body: { ...sellerSignup, email: "unlucky@test.com" },
+      });
+    } finally {
+      Shop.create = realShopCreate;
+    }
+    check("shop save fails after the account was made → 500", r.status === 500);
+    check("...and the account is removed again: never a seller without a shop", await noAccount("unlucky@test.com"));
+
+    r = await req("POST", "/api/auth/seller/register", {
+      body: { ...sellerSignup, email: "unlucky@test.com" },
+    });
+    check("...so the same person can simply try again → 201", r.status === 201);
+
+    // --- The shared shop rules now also protect /api/shops ---
+    console.log("\nShared shop rules on POST/PATCH /api/shops");
+    r = await req("POST", "/api/shops", { token: sellerToken, body: { name: "   ", phone: "1" } });
+    check("POST: shop name of only spaces → 400", r.status === 400 && r.body.error === "Shop name is required");
+
+    r = await req("POST", "/api/shops", { token: sellerToken, body: { name: "Long", phone: "1", address: "a".repeat(201) } });
+    check("POST: address over 200 characters → 400", r.status === 400 && /Address is too long/.test(r.body.error));
+
+    r = await req("POST", "/api/shops", { token: sellerToken, body: { name: "No Phone" } });
+    check("POST: missing phone → 400 'Shop phone is required'", r.status === 400 && r.body.error === "Shop phone is required");
+
+    r = await req("PATCH", "/api/shops/" + shopA._id, { token: sellerToken, body: { category: "" } });
+    check("PATCH: empty category → 400 'Invalid category id' (not a crash)", r.status === 400 && r.body.error === "Invalid category id");
+
+    r = await req("PATCH", "/api/shops/" + shopA._id, { token: sellerToken, body: { name: "" } });
+    check("PATCH: blanking the name → 400", r.status === 400);
+
+    // Tidy up: remove the shops this section created, so the tests further down
+    // see exactly the shops they expect.
+    const signupIds = (await User.find({ email: { $in: signupEmails } }).select("_id")).map((u) => u._id);
+    await Shop.deleteMany({ owner: { $in: signupIds } });
+
     // ================= Products: POST /api/products =================
     console.log("\nPOST /api/products");
 

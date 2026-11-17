@@ -1,7 +1,12 @@
 const express = require("express");
 const asyncHandler = require("../utils/asyncHandler");
 const auth = require("../middleware/auth");
-const { register, loginAs, me } = require("../controllers/auth.controller");
+const {
+  register,
+  registerSeller,
+  loginAs,
+  me,
+} = require("../controllers/auth.controller");
 
 const router = express.Router();
 
@@ -9,10 +14,13 @@ const router = express.Router();
 // the controller. asyncHandler forwards any thrown/rejected error to our
 // central errorHandler.
 
-// Sign-up. Only customers can sign up here; the role can never be chosen by the
-// client. There is NO admin sign-up route at all: new admins are created by an
+// Sign-up. The role is decided by WHICH URL is called, never by the body:
+//   /register        → a customer
+//   /seller/register → a seller, together with their first shop
+// There is NO admin sign-up route at all: new admins are created by an
 // existing admin.
 router.post("/register", asyncHandler(register));
+router.post("/seller/register", asyncHandler(registerSeller));
 
 // One login endpoint per login page. Each accepts ONLY its own kind of account
 // (see loginAs in the controller); the wrong page answers 403 "wrong_portal".
