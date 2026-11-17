@@ -1,6 +1,7 @@
 const express = require("express");
 const asyncHandler = require("../utils/asyncHandler");
 const auth = require("../middleware/auth");
+const { failedLoginLimiter, authIpLimiter } = require("../middleware/rateLimit");
 const {
   register,
   registerSeller,
@@ -21,14 +22,19 @@ const router = express.Router();
 //   /seller/register → a seller, together with their first shop
 // There is NO admin sign-up route at all: new admins are created by an
 // existing admin.
-router.post("/register", asyncHandler(register));
-router.post("/seller/register", asyncHandler(registerSeller));
+//
+// The limiters (middleware/rateLimit.js) run BEFORE the controller: an
+// over-the-limit request is answered 429 without ever reaching it.
+router.post("/register", authIpLimiter, asyncHandler(register));
+router.post("/seller/register", authIpLimiter, asyncHandler(registerSeller));
 
 // One login endpoint per login page. Each accepts ONLY its own kind of account
 // (see loginAs in the controller); the wrong page answers 403 "wrong_portal".
-router.post("/login", asyncHandler(loginAs("customer")));
-router.post("/seller/login", asyncHandler(loginAs("seller")));
-router.post("/admin/login", asyncHandler(loginAs("admin")));
+// All three share the SAME failedLoginLimiter, so switching pages doesn't give
+// anyone extra password guesses.
+router.post("/login", authIpLimiter, failedLoginLimiter, asyncHandler(loginAs("customer")));
+router.post("/seller/login", authIpLimiter, failedLoginLimiter, asyncHandler(loginAs("seller")));
+router.post("/admin/login", authIpLimiter, failedLoginLimiter, asyncHandler(loginAs("admin")));
 
 // Protected route: `auth` runs FIRST. Only a request with a valid token gets
 // past it (otherwise 401), and it sets req.user for the `me` controller to use.

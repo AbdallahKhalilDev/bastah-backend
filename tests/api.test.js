@@ -21,6 +21,11 @@ process.env.MONGO_URI =
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret";
 // Login and register really sign tokens, and signing fails without an expiry.
 process.env.JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
+// Small rate limits, so the rate-limit tests can reach them in a few requests.
+// (Every other request gets its own made-up IP address in req() below, so the
+// rest of the suite never comes near these limits.)
+process.env.LOGIN_MAX_FAILED_ATTEMPTS = "3";
+process.env.AUTH_MAX_REQUESTS = "12";
 
 const path = require("path");
 const { execFile } = require("child_process");
@@ -49,8 +54,20 @@ function check(name, condition) {
 }
 
 let base = ""; // filled in once the server is listening
-async function req(method, path, { token, body } = {}) {
-  const headers = {};
+
+// Every request pretends to come from a DIFFERENT computer, by sending a made-up
+// IP in X-Forwarded-For (the header Render's proxy sets; the app trusts one
+// proxy, see "trust proxy" in app.js). So the hundreds of logins and sign-ups
+// in this file never add up on one rate-limit counter. A test that WANTS
+// requests to share a counter passes the same `ip` each time.
+let fakeIpCounter = 0;
+function nextFakeIp() {
+  fakeIpCounter++;
+  return `10.${(fakeIpCounter >> 16) & 255}.${(fakeIpCounter >> 8) & 255}.${fakeIpCounter & 255}`;
+}
+
+async function req(method, path, { token, body, ip } = {}) {
+  const headers = { "X-Forwarded-For": ip || nextFakeIp() };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = "Bearer " + token;
   const res = await fetch(base + path, {
@@ -64,7 +81,7 @@ async function req(method, path, { token, body } = {}) {
   } catch {
     /* some responses have no body */
   }
-  return { status: res.status, body: json };
+  return { status: res.status, body: json, headers: res.headers };
 }
 
 function tokenFor(user) {
@@ -1147,6 +1164,84 @@ async function main() {
       body: { status: "suspended", reason: "Spam" },
     });
     check("an account with NO status stored can be suspended (it counts as active) → 200", r.status === 200);
+
+    // ================= Rate limiting (limits set small at the top: 3 and 12) =================
+    console.log("\nRate limiting: failed logins per IP + email");
+    for (const email of ["limit.user@test.com", "limit.other@test.com"]) {
+      await req("POST", "/api/auth/register", {
+        body: { name: "Limit Test", email, password: "secret123", phone: "0599151515" },
+      });
+    }
+    const loginAt = (ip, email, password, page = "/api/auth/login") =>
+      req("POST", page, { ip, body: { email, password } });
+
+    // Scenario A: one computer guesses the password of ONE account.
+    const ipA = "198.51.100.1";
+    let fails = [];
+    for (let i = 0; i < 3; i++) fails.push((await loginAt(ipA, "limit.user@test.com", "wrong-" + i)).status);
+    check("3 wrong passwords → 401 each (still allowed)", fails.every((s) => s === 401));
+    r = await loginAt(ipA, "limit.user@test.com", "wrong-4");
+    check("the 4th wrong password → 429", r.status === 429);
+    check("...code 'too_many_attempts' with a clear message", r.body.code === "too_many_attempts" && /wait 15 minutes/.test(r.body.error));
+    check("...and a Retry-After header telling the app how long to wait", Number(r.headers.get("retry-after")) > 0);
+    r = await loginAt(ipA, "limit.user@test.com", "secret123");
+    check("while blocked, even the RIGHT password → 429 (no more guessing)", r.status === 429);
+
+    r = await loginAt(ipA, "limit.other@test.com", "secret123");
+    check("someone ELSE on the same IP (another email) logs in fine → 200", r.status === 200);
+    r = await loginAt(ipA, "limit.other@test.com", "wrong-x");
+    check("...and still gets normal 401s, not the other person's block", r.status === 401);
+    r = await loginAt("198.51.100.2", "limit.user@test.com", "secret123");
+    check("the blocked account from a DIFFERENT IP → 200 (the block is per IP + email)", r.status === 200);
+
+    // Scenario B: the three login pages share one counter.
+    const ipB = "198.51.100.3";
+    await loginAt(ipB, "limit.other@test.com", "wrong-1", "/api/auth/login");
+    await loginAt(ipB, "limit.other@test.com", "wrong-2", "/api/auth/seller/login");
+    await loginAt(ipB, "limit.other@test.com", "wrong-3", "/api/auth/admin/login");
+    r = await loginAt(ipB, "limit.other@test.com", "wrong-4", "/api/auth/login");
+    check("1 wrong guess on each of the 3 login pages, then a 4th → 429 (switching pages gives no extra tries)", r.status === 429);
+
+    // Scenario C: only WRONG PASSWORDS use up tries.
+    const ipC = "198.51.100.4";
+    let ok = [];
+    for (let i = 0; i < 4; i++) ok.push((await loginAt(ipC, "limit.user@test.com", "secret123")).status);
+    check("4 successful logins in a row → all 200 (successes don't count)", ok.every((s) => s === 200));
+    r = await loginAt(ipC, "limit.user@test.com", "secret123", "/api/auth/seller/login");
+    check("right password on the wrong page → 403, and it doesn't count", r.status === 403);
+    r = await req("POST", "/api/auth/login", { ip: ipC, body: { email: "limit.user@test.com" } });
+    check("a form mistake (no password) → 400, and it doesn't count", r.status === 400);
+    fails = [];
+    for (let i = 0; i < 3; i++) fails.push((await loginAt(ipC, "limit.user@test.com", "wrong-" + i)).status);
+    check("...so 3 real wrong guesses are still allowed → 401 each", fails.every((s) => s === 401));
+    r = await loginAt(ipC, "limit.user@test.com", "wrong-4");
+    check("...and the 4th → 429", r.status === 429);
+
+    console.log("\nRate limiting: all sign-up/login requests per IP");
+    const ipD = "198.51.100.5";
+    let codes = [];
+    for (let i = 0; i < 6; i++) codes.push((await req("POST", "/api/auth/register", { ip: ipD, body: {} })).status);
+    for (let i = 0; i < 6; i++) codes.push((await req("POST", "/api/auth/seller/register", { ip: ipD, body: {} })).status);
+    check("12 sign-up requests from one IP → all answered normally (400, bad forms)", codes.every((s) => s === 400));
+    r = await loginAt(ipD, "limit.other@test.com", "secret123");
+    check("the 13th request from that IP (a login) → 429", r.status === 429);
+    check("...code 'too_many_requests'", r.body.code === "too_many_requests");
+    r = await req("GET", "/api/categories", { ip: ipD });
+    check("...but the rest of the app still works for that IP → 200", r.status === 200);
+    r = await loginAt("198.51.100.6", "limit.other@test.com", "secret123");
+    check("another IP is unaffected → 200", r.status === 200);
+
+    console.log("\nTrust proxy: the IP the server sees");
+    r = await req("GET", "/api/health/ip", { ip: "203.0.113.7" });
+    check("GET /api/health/ip shows the visitor's IP from X-Forwarded-For", r.status === 200 && r.body.ip === "203.0.113.7");
+    // express-rate-limit checks its own setup and prints a warning (an error
+    // object with a code starting "ERR_ERL_") if something is wrong, e.g. the
+    // IP handling. It keeps working, so a mistake would go unnoticed without
+    // this check.
+    check(
+      "the rate limiter printed NO configuration warnings",
+      !errorLog.some((args) => args.some((a) => String(a?.code || "").startsWith("ERR_ERL")))
+    );
 
     // ================= Products: POST /api/products =================
     console.log("\nPOST /api/products");

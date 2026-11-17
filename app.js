@@ -18,6 +18,21 @@ const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
 
+// TRUST PROXY — how Express finds a visitor's real IP address.
+// On Render, visitors don't connect to our server directly: Render's own
+// "proxy" server receives the request and passes it on, adding the visitor's
+// real IP to a header called X-Forwarded-For. Without this setting, Express
+// would see only the proxy's address, so EVERY visitor would look like the same
+// person, and the login rate limiter would lock everyone out together.
+//
+// The number is "how many proxies to trust" (Render = 1, per community guides).
+// It must not be higher than the real number, or a visitor could fake their IP
+// by sending their own X-Forwarded-For header. If it's ever wrong on Render,
+// fix it with the TRUST_PROXY_HOPS setting in the Render dashboard, no code
+// change. Check it with GET /api/health/ip, which shows the IP the server sees.
+const proxyHops = parseInt(process.env.TRUST_PROXY_HOPS, 10);
+app.set("trust proxy", Number.isFinite(proxyHops) && proxyHops >= 0 ? proxyHops : 1);
+
 // Allow all origins for now so any frontend can call the API during development.
 // TODO: restrict `origin` to the real frontend URL before/at production launch.
 app.use(cors({ origin: true }));
