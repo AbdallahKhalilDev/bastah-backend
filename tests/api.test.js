@@ -24,8 +24,10 @@ process.env.JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "1h";
 
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
 const app = require("../app");
 const { missingEnv } = require("../config/env");
+const errorHandler = require("../middleware/errorHandler");
 
 const Category = require("../models/Category");
 const User = require("../models/User");
@@ -307,6 +309,110 @@ async function main() {
 
     r = await req("GET", "/api/auth/me", { token: "not-a-real-token" });
     check("garbage token → 401", r.status === 401);
+
+    // ================= Auth: one login page per role =================
+    console.log("\nLogin per role (/login, /seller/login, /admin/login)");
+    // The seeded seller/admin at the top have a fake password hash ("x"), so
+    // they can't log in. These two get a REAL bcrypt hash of "secret123".
+    const realHash = await bcrypt.hash("secret123", 10);
+    await User.create({
+      name: "Portal Seller",
+      email: "portal.seller@test.com",
+      phone: "0599111111",
+      passwordHash: realHash,
+      role: "seller",
+    });
+    await User.create({
+      name: "Portal Admin",
+      email: "portal.admin@test.com",
+      phone: "0599222222",
+      passwordHash: realHash,
+      role: "admin",
+    });
+
+    // Every account tries every login page: 3 accounts × 3 pages. Its own page
+    // lets it in; the other two refuse it.
+    const portals = [
+      { path: "/api/auth/login", role: "customer", email: "new.customer@test.com", wrongMsg: "This is not a customer account" },
+      { path: "/api/auth/seller/login", role: "seller", email: "portal.seller@test.com", wrongMsg: "This is not a seller account" },
+      { path: "/api/auth/admin/login", role: "admin", email: "portal.admin@test.com", wrongMsg: "This is not an admin account" },
+    ];
+    const portalTokens = {};
+    for (const page of portals) {
+      for (const account of portals) {
+        r = await req("POST", page.path, {
+          body: { email: account.email, password: "secret123" },
+        });
+        if (page.role === account.role) {
+          check(
+            `${account.role} on ${page.path} → 200 with a token and role ${account.role}`,
+            r.status === 200 && typeof r.body.token === "string" && r.body.user.role === account.role
+          );
+          portalTokens[account.role] = r.body.token;
+        } else {
+          check(`${account.role} on ${page.path} → 403 '${page.wrongMsg}'`, r.status === 403 && r.body.error === page.wrongMsg);
+          check("...with code 'wrong_portal' and no token", r.body.code === "wrong_portal" && !("token" in r.body));
+        }
+      }
+    }
+
+    // The tokens from the new pages are real, working tokens.
+    r = await req("GET", "/api/auth/me", { token: portalTokens.seller });
+    check("token from /seller/login works on /me (role seller)", r.status === 200 && r.body.user.role === "seller");
+    r = await req("GET", "/api/orders/incoming", { token: portalTokens.seller });
+    check("...and opens a seller-only route → 200", r.status === 200);
+    r = await req("GET", "/api/orders/incoming", { token: portalTokens.admin });
+    check("token from /admin/login opens an admin route → 200", r.status === 200);
+
+    // The wrong-page message only appears after a CORRECT password. With a wrong
+    // password, a stranger learns nothing about what kind of account it is.
+    r = await req("POST", "/api/auth/login", {
+      body: { email: "portal.seller@test.com", password: "wrong-password" },
+    });
+    check("seller email on the customer page with a WRONG password → 401, not 403", r.status === 401);
+    check("...the usual 'Invalid email or password'", r.body.error === "Invalid email or password");
+    check("...and no code (only the wrong-page error has one)", !("code" in r.body));
+
+    r = await req("POST", "/api/auth/admin/login", {
+      body: { email: "nobody@test.com", password: "secret123" },
+    });
+    check("unknown email on the admin page → 401", r.status === 401);
+
+    r = await req("POST", "/api/auth/seller/login", { body: { email: "portal.seller@test.com" } });
+    check("seller page, missing password → 400", r.status === 400);
+
+    r = await req("POST", "/api/auth/admin/register", {
+      body: { name: "Hacker", email: "hacker@test.com", password: "secret123", phone: "1" },
+    });
+    check("there is NO admin sign-up: POST /api/auth/admin/register → 404", r.status === 404);
+    check("...and no admin account was created", !(await User.exists({ email: "hacker@test.com" })));
+
+    // ================= Central error handler: the optional `code` =================
+    // Called directly with a fake `res`, because there's no endpoint that can
+    // make a database-down error on demand.
+    console.log("\nError handler: which errors may carry a code");
+    function fakeRes() {
+      return {
+        statusCode: null,
+        body: null,
+        status(c) { this.statusCode = c; return this; },
+        json(b) { this.body = b; },
+      };
+    }
+    let fr = fakeRes();
+    errorHandler({ status: 403, message: "Nope", code: "wrong_portal" }, {}, fr, () => {});
+    check("our own error with a code → the code is sent", fr.statusCode === 403 && fr.body.code === "wrong_portal");
+
+    fr = fakeRes();
+    errorHandler({ status: 404, message: "Not found" }, {}, fr, () => {});
+    check("our own error without a code → just { error }", Object.keys(fr.body).join() === "error");
+
+    fr = fakeRes();
+    const dbDown = new Error("connect ECONNREFUSED 127.0.0.1:27017");
+    dbDown.code = "ECONNREFUSED";
+    errorHandler(dbDown, {}, fr, () => {});
+    check("a Node error with its own code (database down) → 500", fr.statusCode === 500);
+    check("...and its internal code is NOT sent to the user", !("code" in fr.body));
 
     // ================= Products: POST /api/products =================
     console.log("\nPOST /api/products");

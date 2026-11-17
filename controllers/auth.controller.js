@@ -117,36 +117,67 @@ async function register(req, res, next) {
   res.status(201).json({ user: publicUser(user), token: signToken(user) });
 }
 
-// POST /api/auth/login
-async function login(req, res, next) {
-  // 1. Validate shape (must have an email and a non-empty password).
-  const result = loginSchema.safeParse(req.body);
-  if (!result.success) {
-    const message = result.error.issues[0].message;
-    return next({ status: 400, message });
-  }
-  const { email, password } = result.data;
+// The LOGIN FACTORY — one login logic, one endpoint per login page.
+//
+// Customers, sellers and admins each have their own login page, and an account
+// has exactly ONE role. So each page gets its own endpoint that accepts only its
+// own kind of account:
+//
+//   POST /api/auth/login         → loginAs("customer")
+//   POST /api/auth/seller/login  → loginAs("seller")
+//   POST /api/auth/admin/login   → loginAs("admin")
+//
+// It's the same "factory" idea as requireRole("seller"): you call loginAs with a
+// role, and it RETURNS the actual handler, which remembers that role. All three
+// pages share the code below, so they can never drift apart.
+function loginAs(role) {
+  return async function login(req, res, next) {
+    // 1. Validate shape (must have an email and a non-empty password).
+    const result = loginSchema.safeParse(req.body);
+    if (!result.success) {
+      const message = result.error.issues[0].message;
+      return next({ status: 400, message });
+    }
+    const { email, password } = result.data;
 
-  // 2. Look up the user. IMPORTANT: whether the email is unknown OR the
-  //    password is wrong, we answer with the SAME generic 401. Revealing
-  //    "no such email" vs "wrong password" would let an attacker discover
-  //    which emails have accounts.
-  const user = await User.findOne({ email: email.toLowerCase() });
-  if (!user) {
-    return next({ status: 401, message: "Invalid email or password" });
-  }
+    // 2. Look up the user. IMPORTANT: whether the email is unknown OR the
+    //    password is wrong, we answer with the SAME generic 401. Revealing
+    //    "no such email" vs "wrong password" would let an attacker discover
+    //    which emails have accounts.
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return next({ status: 401, message: "Invalid email or password" });
+    }
 
-  // 3. bcrypt.compare re-hashes the given password and checks it against the
-  //    stored hash. It returns true only if they match.
-  const passwordMatches = await bcrypt.compare(password, user.passwordHash);
-  if (!passwordMatches) {
-    return next({ status: 401, message: "Invalid email or password" });
-  }
+    // 3. bcrypt.compare re-hashes the given password and checks it against the
+    //    stored hash. It returns true only if they match.
+    const passwordMatches = await bcrypt.compare(password, user.passwordHash);
+    if (!passwordMatches) {
+      return next({ status: 401, message: "Invalid email or password" });
+    }
 
-  // 4. Success: send the token AND the user's safe fields. With `user.role` in
-  //    the answer, the app knows at once which screens to open, with no second
-  //    request to /me.
-  res.json({ token: signToken(user), user: publicUser(user) });
+    // 4. Right password, but the WRONG login page (e.g. a customer account on
+    //    the seller page). This check comes AFTER the password on purpose: a
+    //    stranger guessing passwords only ever sees the 401 above, so this
+    //    message can't be used to find out what kind of account an email has.
+    //
+    //    403 = "I know who you are, but not here". `code` is a short, fixed
+    //    label the app can match on to show its own (Arabic) text and a link
+    //    to the right page, instead of matching our English sentence.
+    if (user.role !== role) {
+      const article = role === "admin" ? "an" : "a";
+      return next({
+        status: 403,
+        message: `This is not ${article} ${role} account`,
+        code: "wrong_portal",
+      });
+    }
+
+    // 5. Success: send the token AND the user's safe fields. With `user.role`
+    //    in the answer, the app knows at once which screens to open, with no
+    //    second request to /me.
+    res.json({ token: signToken(user), user: publicUser(user) });
+  };
 }
 
 // GET /api/auth/me  (protected by the `auth` middleware)
@@ -163,4 +194,4 @@ async function me(req, res, next) {
   res.json({ user: publicUser(user) });
 }
 
-module.exports = { register, login, me, publicUser };
+module.exports = { register, loginAs, me, publicUser };

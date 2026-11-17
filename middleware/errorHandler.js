@@ -21,7 +21,22 @@ function errorHandler(err, req, res, next) {
   }
 
   const status = err.status || 500;
-  res.status(status).json({ error: err.message || "Something went wrong" });
+  const body = { error: err.message || "Something went wrong" };
+
+  // An optional `code`: a short fixed label (e.g. "wrong_portal") that the app
+  // can match on to show its own translated text. Most errors don't have one,
+  // and then the reply is just { error } as always.
+  //
+  // We pass it on ONLY for errors WE created with next({ status, message, code }).
+  // Those always have a `status`. Errors thrown by Node or a library often carry
+  // a `code` of their own (like "ECONNREFUSED" when the database is down), and
+  // that internal detail must never reach users. Those errors have no `status`,
+  // so this check filters them out.
+  if (err.status && typeof err.code === "string") {
+    body.code = err.code;
+  }
+
+  res.status(status).json(body);
 }
 
 module.exports = errorHandler;
