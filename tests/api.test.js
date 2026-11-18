@@ -2633,6 +2633,40 @@ async function main() {
     r = await req("GET", "/api/orders/incoming?status=banana", { token: sellerToken });
     check("unknown ?status → 400 Invalid status", r.status === 400 && r.body?.error === "Invalid status");
 
+    // ?shop=<id>: one shop's inbox (slice 17.1). `seller` owns Shop A (2 orders)
+    // and Shop B (none); otherShop (1 order) belongs to otherSeller.
+    console.log("\nGET /api/orders/incoming?shop= (one shop's inbox)");
+
+    r = await req("GET", `/api/orders/incoming?shop=${shopA._id}`, { token: sellerToken });
+    check("my Shop A → its 2 orders", r.status === 200 && r.body?.total === 2 && r.body.orders.every((o) => o.shop?.name === "Shop A"));
+
+    r = await req("GET", `/api/orders/incoming?shop=${shopB._id}`, { token: sellerToken });
+    check("my Shop B (no orders yet) → empty page, 200", r.status === 200 && r.body?.total === 0);
+
+    r = await req("GET", `/api/orders/incoming?shop=${otherShop._id}`, { token: sellerToken });
+    check("another seller's shop → 403", r.status === 403);
+
+    r = await req("GET", `/api/orders/incoming?shop=${shopA._id}`, { token: tokenFor(otherSeller) });
+    check("...and the other way round → 403", r.status === 403);
+
+    r = await req("GET", `/api/orders/incoming?shop=${FAKE_ID}`, { token: sellerToken });
+    check("a shop id that doesn't exist → 403 (it isn't one of mine)", r.status === 403);
+
+    r = await req("GET", "/api/orders/incoming?shop=banana", { token: sellerToken });
+    check("a malformed shop id → 400 Invalid shop id", r.status === 400 && r.body?.error === "Invalid shop id");
+
+    r = await req("GET", `/api/orders/incoming?shop=${shopA._id}&shop=${shopB._id}`, { token: sellerToken });
+    check("?shop given twice → 400 (not silently one of them)", r.status === 400);
+
+    r = await req("GET", `/api/orders/incoming?shop=${otherShop._id}`, { token: adminToken });
+    check("an admin may look at ANY shop's inbox", r.status === 200 && r.body?.total === 1 && r.body.orders[0]._id === otherShopOrderId);
+
+    r = await req("GET", `/api/orders/incoming?shop=${shopA._id}&status=pending`, { token: sellerToken });
+    check("?shop and ?status combine", r.status === 200 && r.body?.total === 2);
+
+    r = await req("GET", `/api/orders/incoming?shop=${shopA._id}&status=completed`, { token: sellerToken });
+    check("...and narrow each other (no completed orders yet)", r.status === 200 && r.body?.total === 0);
+
     // ============ Orders: PATCH /api/orders/:id/status ============
     console.log("\nPATCH /api/orders/:id/status");
 
@@ -3120,6 +3154,108 @@ async function main() {
 
     r = await req("GET", "/api/orders?status=delivering", { token: orderCustomerToken });
     check("?status=delivering is now a valid filter", r.status === 200);
+
+    // ============ Seller dashboard: /api/seller (slice 17.1) ============
+    // Its own small world, so the counts below are exact: a new seller with an
+    // OPEN shop (two items, one out of stock) and a CLOSED shop (one item), plus
+    // one item of the same product at someone else's shop that must never show.
+    console.log("\n/api/seller: sellers only (router-level guard)");
+
+    const dashSeller = await User.create({
+      name: "Dash Seller",
+      email: "dash-seller@test.com",
+      passwordHash: "x",
+      role: "seller",
+    });
+    const dashToken = tokenFor(dashSeller);
+    const dashArea = await Area.create({ name: "Dash Area", nameAr: "منطقة", slug: "dash-area" });
+    const dashOpenShop = await Shop.create({
+      owner: dashSeller._id,
+      name: "Dash Open",
+      phone: "10",
+      category: category._id,
+      deliveryZones: [{ area: dashArea._id, fee: 5 }],
+    });
+    const dashClosedShop = await Shop.create({
+      owner: dashSeller._id,
+      name: "Dash Closed",
+      phone: "11",
+      isActive: false,
+    });
+    const [dashP1, dashP2, dashP3] = await Product.create([
+      { name: "Dash Rice", nameAr: "أرز", category: category._id },
+      { name: "Dash Oil", nameAr: "زيت", category: category._id },
+      { name: "Dash Tea", nameAr: "شاي", category: category._id },
+    ]);
+    // Created one at a time, so "newest first" is a known order: P3, P2, P1.
+    await Listing.create({ shop: dashOpenShop._id, product: dashP1._id, price: 10 });
+    await Listing.create({ shop: dashOpenShop._id, product: dashP2._id, price: 20, inStock: false });
+    const dashClosedListing = await Listing.create({ shop: dashClosedShop._id, product: dashP3._id, price: 30 });
+    const notMineListing = await Listing.create({ shop: otherShop._id, product: dashP1._id, price: 11 });
+
+    r = await req("GET", "/api/seller/shops");
+    check("no token → 401", r.status === 401);
+    r = await req("GET", "/api/seller/shops", { token: customerToken });
+    check("a customer → 403", r.status === 403);
+    r = await req("GET", "/api/seller/shops", { token: adminToken });
+    check("an admin → 403 (admins use /api/admin)", r.status === 403);
+    r = await req("GET", "/api/seller/nothing-here", { token: customerToken });
+    check("even an unknown /api/seller path → 403 for a non-seller", r.status === 403);
+
+    console.log("\nGET /api/seller/shops (my shops)");
+    r = await req("GET", "/api/seller/shops", { token: dashToken });
+    const myShops = r.body?.shops || [];
+    check("200 with exactly my 2 shops", r.status === 200 && myShops.length === 2);
+    check("oldest first (the sign-up shop comes first)", myShops[0]?.name === "Dash Open" && myShops[1]?.name === "Dash Closed");
+    check("the CLOSED shop is included (the public list hides it)", myShops[1]?.isActive === false);
+    check("another seller's shop never appears", !myShops.some((s) => s.name === "Other Shop"));
+    check("delivery zones come with the area's name", myShops[0]?.deliveryZones?.[0]?.area?.name === "Dash Area" && myShops[0].deliveryZones[0].fee === 5);
+    check("the category is populated", myShops[0]?.category?.name === "Grocery");
+    check("isVerified is there for the dashboard badge", myShops[0]?.isVerified === false);
+
+    r = await req("GET", "/api/seller/shops", { token: tokenFor(shoplessSeller) });
+    check("a seller with no shops → [] and 200 (not an error)", r.status === 200 && Array.isArray(r.body?.shops) && r.body.shops.length === 0);
+
+    console.log("\nGET /api/seller/listings (my items)");
+    r = await req("GET", "/api/seller/listings", { token: dashToken });
+    let myItems = r.body?.listings || [];
+    check("paginated shape { listings, page, limit, total }", r.status === 200 && r.body?.page === 1 && typeof r.body?.limit === "number");
+    check("all 3 of my items, across both shops", r.body?.total === 3 && myItems.length === 3);
+    check("newest first", myItems.map((l) => l.product?.name).join(",") === "Dash Tea,Dash Oil,Dash Rice");
+    check("the closed shop's item is included, marked closed", myItems[0]?._id === dashClosedListing._id.toString() && myItems[0]?.shop?.isActive === false);
+    check("each item shows its shop's name", myItems[1]?.shop?.name === "Dash Open");
+    check("each item shows its product", myItems[1]?.product?.nameAr === "زيت" && typeof myItems[1]?.product?.imageUrl === "string");
+    check("the same product at someone else's shop never shows", !myItems.some((l) => l._id === notMineListing._id.toString()));
+
+    r = await req("GET", `/api/seller/listings?shop=${dashOpenShop._id}`, { token: dashToken });
+    check("?shop= one of my shops → only its 2 items", r.status === 200 && r.body?.total === 2 && r.body.listings.every((l) => l.shop?.name === "Dash Open"));
+
+    r = await req("GET", `/api/seller/listings?shop=${dashClosedShop._id}`, { token: dashToken });
+    check("?shop= my CLOSED shop works too", r.status === 200 && r.body?.total === 1);
+
+    r = await req("GET", `/api/seller/listings?shop=${otherShop._id}`, { token: dashToken });
+    check("?shop= someone else's shop → 403", r.status === 403);
+
+    r = await req("GET", "/api/seller/listings?shop=banana", { token: dashToken });
+    check("?shop= malformed → 400 Invalid shop id", r.status === 400 && r.body?.error === "Invalid shop id");
+
+    r = await req("GET", "/api/seller/listings?inStock=false", { token: dashToken });
+    check("?inStock=false → only the out-of-stock item", r.status === 200 && r.body?.total === 1 && r.body.listings[0]?.product?.name === "Dash Oil");
+
+    r = await req("GET", "/api/seller/listings?inStock=true", { token: dashToken });
+    check("?inStock=true → the 2 in-stock items", r.status === 200 && r.body?.total === 2);
+
+    r = await req("GET", "/api/seller/listings?inStock=yes", { token: dashToken });
+    check("?inStock=yes → 400", r.status === 400 && r.body?.error === "inStock must be true or false");
+
+    r = await req("GET", `/api/seller/listings?shop=${dashOpenShop._id}&inStock=true`, { token: dashToken });
+    check("?shop and ?inStock combine", r.status === 200 && r.body?.total === 1 && r.body.listings[0]?.product?.name === "Dash Rice");
+
+    r = await req("GET", "/api/seller/listings?limit=1&page=2", { token: dashToken });
+    check("pagination: page 2 of 1-per-page is the 2nd newest, total unchanged", r.status === 200 && r.body?.listings?.length === 1 && r.body.listings[0]?.product?.name === "Dash Oil" && r.body?.total === 3);
+
+    r = await req("GET", "/api/seller/listings", { token: tokenFor(shoplessSeller) });
+    check("a seller with no shops → empty page, 200", r.status === 200 && r.body?.total === 0);
 
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body

@@ -14,6 +14,7 @@ const orderRoutes = require("./routes/order.routes");
 const homeRoutes = require("./routes/home.routes");
 const searchRoutes = require("./routes/search.routes");
 const adminRoutes = require("./routes/admin.routes");
+const sellerRoutes = require("./routes/seller.routes");
 const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
@@ -65,6 +66,7 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/home", homeRoutes);
 app.use("/api/search", searchRoutes);
 app.use("/api/admin", adminRoutes); // every route inside is admin-only
+app.use("/api/seller", sellerRoutes); // every route inside is seller-only
 
 app.use((req, res, next) => {
   next({ status: 404, message: "Route not found" });

@@ -84,4 +84,15 @@ async function checkCategory(categoryId) {
   return null;
 }
 
-module.exports = { createShopSchema, updateShopSchema, signupShopSchema, checkCategory };
+// The ONE description of how a shop's delivery zones are populated for a read
+// (each zone's area id → its name). The public shop pages AND the seller
+// dashboard use it, so the two can't show zones in different shapes.
+const ZONE_POPULATE = { path: "deliveryZones.area", select: "name nameAr slug" };
+
+module.exports = {
+  createShopSchema,
+  updateShopSchema,
+  signupShopSchema,
+  checkCategory,
+  ZONE_POPULATE,
+};

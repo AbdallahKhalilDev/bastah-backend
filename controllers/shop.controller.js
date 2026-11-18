@@ -4,10 +4,6 @@ const Shop = require("../models/Shop");
 const Area = require("../models/Area");
 const homeQueries = require("../utils/homeQueries");
 
-// The ONE description of how delivery zones are populated for a read, so the
-// endpoints that expose them can't drift apart.
-const ZONE_POPULATE = { path: "deliveryZones.area", select: "name nameAr slug" };
-
 // --- Input validation ---------------------------------------------------
 // The rules for a shop's fields (createShopSchema, updateShopSchema) and the
 // category check live in utils/shopRules.js. Seller sign-up creates a shop too,
@@ -18,6 +14,7 @@ const {
   createShopSchema,
   updateShopSchema,
   checkCategory,
+  ZONE_POPULATE,
 } = require("../utils/shopRules");
 
 // The whitelist for SETTING a shop's delivery zones. This is the first

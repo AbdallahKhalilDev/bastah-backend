@@ -19,6 +19,7 @@ const {
   money,
   resolveDeliveryFee,
 } = require("../utils/orderQueries");
+const { shopFilter } = require("../utils/sellerQueries");
 
 // --- Input validation -----------------------------------------------------
 // A WHITELIST for placing an order. Only these two keys are accepted.
@@ -339,28 +340,21 @@ async function getOrder(req, res, next) {
 
 // GET /api/orders/incoming
 // Protected: a logged-in SELLER or ADMIN. The seller's inbox — every order
-// placed at any shop they own, newest first, paginated.
+// placed at any shop they own, newest first, paginated. An admin sees every
+// order in the marketplace.
 //
-// This is the first query in Bastah shaped "everything belonging to ANY of my
-// things", because Shop.owner has no `unique`: one seller may own several shops.
-// So it's two steps — find my shop ids, then one query filtered by them.
+// Optional ?shop=<id> narrows it to ONE shop (a seller with several shops wants
+// one inbox per shop). A seller may only name their own shops (else 403).
+//
+// "Which shops are mine?" is answered by shopFilter() in utils/sellerQueries.js,
+// shared with the seller dashboard, so the inbox and the dashboard can never
+// disagree about what a seller owns.
 async function listIncomingOrders(req, res, next) {
   const { page, limit, skip } = parsePagination(req.query);
 
-  let filter;
-  if (req.user.role === "admin") {
-    // An admin oversees the whole marketplace, so their inbox is every order.
-    filter = {};
-  } else {
-    // Ask only for the ids — we don't need the whole shop documents, just
-    // something to filter orders by.
-    const myShops = await Shop.find({ owner: req.user.id }).select("_id");
-    const myShopIds = myShops.map((s) => s._id);
-
-    // $in means "shop is any one of these". A seller who owns NO shops yet ends
-    // up with `$in: []`, which matches nothing — an empty page, which is
-    // already the right answer. No special case needed.
-    filter = { shop: { $in: myShopIds } };
+  const { problem, filter } = await shopFilter(req.user, req.query.shop);
+  if (problem) {
+    return next(problem);
   }
 
   // Same ?status= whitelist as listMyOrders: a misspelt status is a real
