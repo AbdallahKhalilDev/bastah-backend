@@ -4053,6 +4053,127 @@ async function main() {
     check("...says so in its report", seedRun.stdout.includes("Football (size 5) (keeps football.webp)"));
     check("...and doesn't warn that football.webp matches nothing", !seedRun.stderr.includes("football.webp matches no product"));
 
+    // ============ Admin: hiding products (slice 17.7) ============
+    // One product followed through every place a customer could see it.
+    console.log("\nPATCH /api/admin/products/:id/active (hide a product)");
+    const activeUrl = (id) => `/api/admin/products/${id}/active`;
+    const visibleCount = () => Product.countDocuments({ isActive: { $ne: false } });
+
+    r = await req("POST", "/api/products", {
+      token: dashToken,
+      body: { name: "Hide Me Soap", nameAr: "صابون", category: category._id.toString() },
+    });
+    const soapId = r.body?.product?._id;
+    r = await req("POST", `/api/shops/${dashOpenShop._id}/listings`, { token: dashToken, body: { product: soapId, price: 4 } });
+    const soapDashListingId = r.body?.listing?._id;
+    await req("POST", `/api/shops/${otherShop._id}/listings`, { token: otherSellerToken, body: { product: soapId, price: 3.5 } });
+    await req("PATCH", `/api/products/${soapId}/feature`, { token: adminToken, body: { isFeatured: true } });
+    await req("DELETE", "/api/cart", { token: customer2Token });
+    r = await req("POST", "/api/cart/items", { token: customer2Token, body: { listing: soapDashListingId } });
+    check("(setup) the soap is sold by 2 shops, featured, and in a customer's cart", r.status < 300);
+    r = await req("GET", `/api/products/${soapId}`);
+    check("(setup) before hiding, customers can see it", r.status === 200 && r.body?.product?.isActive === true);
+
+    r = await req("PATCH", activeUrl(soapId), { token: dashToken, body: { isActive: false } });
+    check("a seller → 403 (even the one who added it)", r.status === 403);
+    r = await req("PATCH", activeUrl("banana"), { token: adminToken, body: { isActive: false } });
+    check("malformed product id → 400", r.status === 400 && r.body?.error === "Invalid product id");
+    r = await req("PATCH", activeUrl(FAKE_ID), { token: adminToken, body: { isActive: false } });
+    check("unknown product → 404", r.status === 404);
+    r = await req("PATCH", activeUrl(soapId), { token: adminToken, body: {} });
+    check("no isActive → 400", r.status === 400 && r.body?.error === "isActive must be true or false");
+
+    r = await req("PATCH", activeUrl(soapId), { token: adminToken, body: { isActive: false } });
+    check("hide → 200, isActive false", r.status === 200 && r.body?.product?.isActive === false);
+    check("...the reply shows who created it (for the admin)", r.body?.product?.createdBy?.name === "Dash Seller");
+
+    console.log("\nA hidden product disappears for customers");
+    r = await req("GET", `/api/products/${soapId}`);
+    check("its product page → 404", r.status === 404);
+    r = await req("GET", `/api/products/${soapId}/listings`);
+    check("its price comparison → 404", r.status === 404);
+    r = await req("GET", "/api/products?limit=50");
+    check("not in the product list, and the total doesn't count it", !r.body.products.some((p) => p._id === soapId) && r.body.total === (await visibleCount()));
+    r = await req("GET", "/api/products/search?q=Hide%20Me%20Soap");
+    check("product search doesn't find it", r.status === 200 && r.body?.total === 0);
+    r = await req("GET", "/api/products/new?limit=50");
+    check("not in new arrivals", !r.body.products.some((p) => p._id === soapId) && r.body.total === (await visibleCount()));
+    r = await req("GET", "/api/products/featured?limit=50");
+    check("not in featured, though it's still flagged featured", !r.body.products.some((p) => p._id === soapId));
+    r = await req("GET", "/api/search?q=Hide%20Me%20Soap");
+    check("global search doesn't find it", r.status === 200 && r.body?.products?.length === 0 && r.body?.counts?.products === 0);
+    r = await req("GET", "/api/home");
+    check(
+      "not on the Home page",
+      r.status === 200 && ![...r.body.featured, ...r.body.newArrivals].some((p) => p._id === soapId)
+    );
+    r = await req("GET", `/api/shops/${dashOpenShop._id}/products`);
+    check(
+      "gone from the shop's page, while the shop's other items stay",
+      r.status === 200 && r.body.listings.length > 0 && r.body.listings.every((l) => l.product && l.product._id !== soapId)
+    );
+
+    r = await req("POST", `/api/shops/${dashThirdId}/listings`, { token: dashToken, body: { product: soapId, price: 4 } });
+    check("a shop can't start selling it → 400", r.status === 400 && r.body?.error === "This product has been hidden by an admin");
+    r = await req("POST", `/api/shops/${dashThirdId}/listings`, { token: adminToken, body: { product: soapId, price: 4 } });
+    check("...not even through an admin", r.status === 400);
+
+    r = await req("GET", "/api/cart", { token: customer2Token });
+    check("in a cart it stays, marked as hidden", r.body?.cart?.items?.[0]?.listing?.product?.isActive === false);
+    r = await req("POST", "/api/orders", { token: customer2Token, body: { contactPhone: "0599" } });
+    check(
+      "checkout → 409, nothing ordered",
+      r.status === 409 && r.body?.error === "Hide Me Soap is no longer available. Remove it and try again."
+    );
+
+    r = await req("GET", `/api/seller/listings?shop=${dashOpenShop._id}`, { token: dashToken });
+    check("the seller still sees their item, marked hidden", r.body?.listings?.find((l) => l.product?._id === soapId)?.product?.isActive === false);
+    r = await req("GET", "/api/seller/products", { token: dashToken });
+    check("...and in 'products I added'", r.body?.products?.find((p) => p._id === soapId)?.isActive === false);
+
+    console.log("\nGET /api/admin/products (the whole catalog)");
+    r = await req("GET", "/api/admin/products", { token: dashToken });
+    check("a seller → 403", r.status === 403);
+
+    r = await req("GET", "/api/admin/products", { token: adminToken });
+    const newestProduct = r.body?.products?.[0];
+    check("every product, hidden ones too, newest first", r.status === 200 && r.body?.total === (await Product.countDocuments()) && newestProduct?._id === soapId);
+    check("each shows its creator (name, email, role)", newestProduct?.createdBy?.email === "dash-seller@test.com" && newestProduct.createdBy.role === "seller");
+    check("...and how many shops sell it", newestProduct?.shopCount === 2);
+    check("...and its category", newestProduct?.category?.name === "Grocery");
+
+    r = await req("GET", "/api/admin/products?q=Dash%20Rice", { token: adminToken });
+    check("an old product: creator unknown (null), sold by 2 shops", r.body?.total === 1 && r.body.products[0].createdBy === null && r.body.products[0].shopCount === 2);
+    r = await req("GET", "/api/admin/products?q=Edit%20Me%20Jam", { token: adminToken });
+    check("a product nobody sells → shopCount 0", r.body?.products?.[0]?.shopCount === 0);
+
+    r = await req("GET", "/api/admin/products?isActive=false", { token: adminToken });
+    check("?isActive=false → only the hidden one", r.body?.total === 1 && r.body.products[0]?._id === soapId);
+    r = await req("GET", "/api/admin/products?isActive=true", { token: adminToken });
+    check("?isActive=true → every visible one (old ones with nothing stored too)", r.body?.total === (await visibleCount()));
+    r = await req("GET", `/api/admin/products?createdBy=${dashSeller._id}`, { token: adminToken });
+    check("?createdBy= → what one person added", r.body?.total === (await Product.countDocuments({ createdBy: dashSeller._id })) && r.body.total >= 4);
+    r = await req("GET", `/api/admin/products?category=${category._id}&q=soap`, { token: adminToken });
+    check("?category= and ?q= combine", r.body?.total === 1);
+
+    r = await req("GET", "/api/admin/products?isActive=no", { token: adminToken });
+    check("?isActive=no → 400", r.status === 400 && r.body?.error === "isActive must be true or false");
+    r = await req("GET", "/api/admin/products?category=banana", { token: adminToken });
+    check("?category=banana → 400", r.status === 400 && r.body?.error === "Invalid category id");
+    r = await req("GET", "/api/admin/products?createdBy=banana", { token: adminToken });
+    check("?createdBy=banana → 400", r.status === 400 && r.body?.error === "Invalid user id");
+
+    console.log("\nShowing a hidden product again");
+    r = await req("PATCH", activeUrl(soapId), { token: adminToken, body: { isActive: true } });
+    check("show → 200, isActive true", r.status === 200 && r.body?.product?.isActive === true);
+    r = await req("PATCH", activeUrl(soapId), { token: adminToken, body: { isActive: true } });
+    check("sending the same value again is fine → 200", r.status === 200);
+    r = await req("GET", `/api/products/${soapId}/listings`);
+    check("its price comparison is back, with both shops", r.status === 200 && r.body?.listings?.length === 2);
+    r = await req("GET", "/api/products/featured?limit=50");
+    check("...and it's featured again (the flag was kept)", r.body.products.some((p) => p._id === soapId));
+    await req("DELETE", "/api/cart", { token: customer2Token });
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

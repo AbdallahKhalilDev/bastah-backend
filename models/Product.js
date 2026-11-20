@@ -69,6 +69,19 @@ const productSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // false = HIDDEN by an admin: gone from every customer page (browse, search,
+    // home, product page, price comparison, a shop's items), can't be listed by
+    // a shop again, and can't be checked out. Never deleted, because listings,
+    // carts and old orders point at it. Set ONLY with the admin-only
+    // PATCH /api/admin/products/:id/active.
+    //
+    // Products made before this field have nothing stored, so public reads
+    // filter with VISIBLE_PRODUCT ({ isActive: { $ne: false } } = "not hidden")
+    // rather than { isActive: true }, which would skip all of them.
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
     // Who added this product to the catalog (set by POST /api/products from the
     // token, never from the body). It decides who may EDIT it: the seller who
     // created it, until another seller's shop sells it too (see

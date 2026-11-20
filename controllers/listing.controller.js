@@ -5,6 +5,7 @@ const Shop = require("../models/Shop");
 const Product = require("../models/Product");
 const parsePagination = require("../utils/pagination");
 const parseBooleanQuery = require("../utils/booleanQuery");
+const { VISIBLE_PRODUCT } = require("../utils/productRules");
 const {
   shopFilter,
   staleFilter,
@@ -77,6 +78,11 @@ async function createListing(req, res, next) {
   const product = await Product.findById(data.product);
   if (!product) {
     return next({ status: 400, message: "Product not found" });
+  }
+  // A product an admin hid can't get NEW prices: it would reappear on the shop's
+  // page. (Admins too: un-hide it first.) Existing listings for it stay.
+  if (product.isActive === false) {
+    return next({ status: 400, message: "This product has been hidden by an admin" });
   }
 
   // 6. Create the listing. shop comes from the verified URL, product/price/
@@ -222,11 +228,20 @@ async function listShopProducts(req, res, next) {
   //    slim slice of the product (the fields the profile card needs). Each
   //    listing already carries its own price and inStock. A shop with no
   //    listings simply gives back [] — an empty list is a valid answer (200).
+  //
+  //    `match` is a filter for the POPULATE itself: a product that doesn't pass
+  //    it (one an admin hid) is NOT filled in, and comes back as null. Then we
+  //    drop the listings whose product is null, so hidden products never show
+  //    on a shop's page.
   const listings = await Listing.find({ shop: req.params.shopId })
     .sort({ createdAt: -1 })
-    .populate("product", "name nameAr imageUrl unit category");
+    .populate({
+      path: "product",
+      select: "name nameAr imageUrl unit category",
+      match: VISIBLE_PRODUCT,
+    });
 
-  res.json({ listings });
+  res.json({ listings: listings.filter((l) => l.product) });
 }
 
 // GET /api/products/:id/listings
@@ -235,12 +250,13 @@ async function listShopProducts(req, res, next) {
 // shop and lists its products; this one fixes a product and lists the shops
 // selling it, so a shopper can compare prices at a glance.
 async function listProductListings(req, res, next) {
-  // 1. Guard the id, then confirm the product exists (so we can 404 clearly and
-  //    include the product's own details in the response).
+  // 1. Guard the id, then confirm the product exists and isn't hidden (so we
+  //    can 404 clearly and include the product's own details in the response).
+  //    A hidden product has no price comparison: 404, like its product page.
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     return next({ status: 400, message: "Invalid product id" });
   }
-  const product = await Product.findById(req.params.id);
+  const product = await Product.findOne({ _id: req.params.id, ...VISIBLE_PRODUCT });
   if (!product) {
     return next({ status: 404, message: "Product not found" });
   }
@@ -357,7 +373,9 @@ async function listDashboardListings(req, res, next) {
       .sort(sort)
       .skip(skip)
       .limit(limit)
-      .populate("product", "name nameAr imageUrl unit category")
+      // isActive so the dashboard can mark items whose product an admin hid
+      // (customers no longer see those; the seller should know why).
+      .populate("product", "name nameAr imageUrl unit category isActive")
       // The shop's name so items of different shops can be told apart, and
       // isActive so the dashboard can mark items of a closed shop.
       .populate("shop", "name isActive"),

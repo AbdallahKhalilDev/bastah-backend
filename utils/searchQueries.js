@@ -22,6 +22,7 @@
 const Product = require("../models/Product");
 const Shop = require("../models/Shop");
 const Category = require("../models/Category");
+const { VISIBLE_PRODUCT } = require("./productRules");
 const escapeRegex = require("./escapeRegex");
 // Reuse the SAME safe public shop projection the Home page uses — one source of
 // truth for "which shop fields are safe to expose" (notably: never `owner`, so
@@ -47,7 +48,9 @@ async function searchProducts({ q, limit, skip = 0 }) {
   const rx = toRegex(q);
   if (!rx) return { items: [], total: 0 };
 
-  const filter = { $or: [{ name: rx }, { nameAr: rx }] };
+  // Not hidden (VISIBLE_PRODUCT) AND the name matches: every key of a filter
+  // must hold, so the two conditions sit side by side.
+  const filter = { ...VISIBLE_PRODUCT, $or: [{ name: rx }, { nameAr: rx }] };
   const [items, total] = await Promise.all([
     Product.find(filter)
       .sort({ name: 1 })

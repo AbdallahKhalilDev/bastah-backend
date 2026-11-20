@@ -130,6 +130,14 @@ async function createOrder(req, res, next) {
           "An item in your cart is no longer available. Remove it and try again.",
       });
     }
+    // An admin hid the product since it went in the cart. Same treatment as a
+    // deleted listing: refuse the whole checkout, never drop the line quietly.
+    if (item.listing.product && item.listing.product.isActive === false) {
+      return next({
+        status: 409,
+        message: `${item.listing.product.name} is no longer available. Remove it and try again.`,
+      });
+    }
     if (!item.listing.inStock) {
       const name = item.listing.product
         ? item.listing.product.name

@@ -52,7 +52,10 @@ function getPopulatedCart(customerId) {
     path: "items.listing",
     select: "price inStock shop product",
     populate: [
-      { path: "product", select: "name nameAr imageUrl unit" },
+      // isActive: false = an admin hid this product since it went in the cart.
+      // The cart still shows the line (so the customer sees what happened), the
+      // app can grey it out, and checkout refuses it until it's removed.
+      { path: "product", select: "name nameAr imageUrl unit isActive" },
       { path: "shop", select: "name area phone" },
     ],
   });

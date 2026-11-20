@@ -42,6 +42,13 @@ const productFields = {
   unit: z.string().trim().max(30, "Unit is too long (max 30 characters)").optional(),
 };
 
+// The ONE filter for "a product customers may see": not hidden by an admin.
+// `$ne: false` = "anything except false", which includes products with no
+// isActive stored at all (made before hiding existed). { isActive: true } would
+// wrongly skip those. Every public product read adds this to its filter, so a
+// hidden product disappears from all of them at once.
+const VISIBLE_PRODUCT = { isActive: { $ne: false } };
+
 // POST /api/products: name, nameAr and category are required.
 const createProductSchema = z.object(productFields);
 
@@ -97,6 +104,7 @@ async function sharedProductIds(productIds, sellerId) {
 }
 
 module.exports = {
+  VISIBLE_PRODUCT,
   createProductSchema,
   updateProductSchema,
   checkCanEditProduct,

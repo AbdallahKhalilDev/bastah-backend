@@ -13,6 +13,8 @@
 
 const Product = require("../models/Product");
 const Shop = require("../models/Shop");
+// Hidden products (an admin hid them) never appear on the Home page.
+const { VISIBLE_PRODUCT } = require("./productRules");
 
 // The ONLY shop fields safe to expose on a public Home-page card. This is an
 // INCLUSION projection: MongoDB returns exactly these keys (plus _id) and nothing
@@ -40,7 +42,7 @@ function clampLimit(query, def) {
 // asks for the first `limit` (skip defaults to 0). We populate the category down
 // to name/nameAr only — the same public projection every other product read uses.
 function getNewArrivals({ limit, skip = 0 }) {
-  return Product.find({})
+  return Product.find(VISIBLE_PRODUCT)
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
@@ -57,7 +59,9 @@ function getNewArrivals({ limit, skip = 0 }) {
 // moment an admin flags some. Because this is async, we await the featured query,
 // then decide whether to fall back.
 async function getFeaturedProducts({ limit }) {
-  const featured = await Product.find({ isFeatured: true })
+  // A hidden product stays flagged as featured (so un-hiding brings it back),
+  // but VISIBLE_PRODUCT keeps it off the page while it's hidden.
+  const featured = await Product.find({ isFeatured: true, ...VISIBLE_PRODUCT })
     .sort({ createdAt: -1 })
     .limit(limit)
     .populate("category", "name nameAr");

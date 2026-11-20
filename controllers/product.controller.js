@@ -16,6 +16,7 @@ const { checkCategory } = require("../utils/shopRules");
 // `npm run seed:product-images` links its real photo later. If a client sends
 // imageUrl anyway, zod strips it like any other unknown key.
 const {
+  VISIBLE_PRODUCT,
   createProductSchema,
   updateProductSchema,
   checkCanEditProduct,
@@ -76,13 +77,13 @@ async function listProducts(req, res, next) {
   const { page, limit, skip } = parsePagination(req.query);
 
   // countDocuments is a separate, cheap query that returns HOW MANY products
-  // match — here, all of them. It's the total across every page, not just this
-  // one, so the frontend knows how many pages exist.
-  const total = await Product.countDocuments({});
+  // match — here, every product that isn't hidden. It's the total across every
+  // page, not just this one, so the frontend knows how many pages exist.
+  const total = await Product.countDocuments(VISIBLE_PRODUCT);
 
   // The actual page: sort newest-first, jump over `skip` docs, take `limit`.
   // populate swaps each category id for just its name/nameAr (nothing else).
-  const products = await Product.find({})
+  const products = await Product.find(VISIBLE_PRODUCT)
     .sort({ createdAt: -1 })
     .skip(skip)
     .limit(limit)
@@ -93,14 +94,15 @@ async function listProducts(req, res, next) {
 
 // GET /api/products/:id
 // Public. Returns a single product by its id, with its category populated.
+// A product an admin hid is a 404, the same answer as one that doesn't exist.
 async function getProduct(req, res, next) {
   // 1. Guard the id FIRST (else findById throws a CastError on junk like "abc").
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     return next({ status: 400, message: "Invalid product id" });
   }
 
-  // 2. Look it up. A well-formed id matching nothing → 404.
-  const product = await Product.findById(req.params.id).populate(
+  // 2. Look it up: this id AND not hidden. Matching nothing → 404.
+  const product = await Product.findOne({ _id: req.params.id, ...VISIBLE_PRODUCT }).populate(
     "category",
     "name nameAr"
   );
@@ -119,9 +121,9 @@ async function getProduct(req, res, next) {
 async function searchProducts(req, res, next) {
   const { page, limit, skip } = parsePagination(req.query);
 
-  // We build up a MongoDB "filter" object piece by piece. An empty {} matches
-  // everything; each param we're given adds another condition to narrow it.
-  const filter = {};
+  // We build up a MongoDB "filter" object piece by piece. It starts as "every
+  // product that isn't hidden"; each param we're given adds another condition.
+  const filter = { ...VISIBLE_PRODUCT };
 
   // q — case-insensitive PARTIAL text match on name OR nameAr. We use a regex:
   // new RegExp("sug", "i") matches "Sugar", "sugar cane", etc. ($or = "either
@@ -178,7 +180,7 @@ async function getFeaturedProducts(req, res, next) {
 // as the main browse list, so a frontend can page through everything new.
 async function getNewArrivals(req, res, next) {
   const { page, limit, skip } = parsePagination(req.query);
-  const total = await Product.countDocuments({});
+  const total = await Product.countDocuments(VISIBLE_PRODUCT);
   const products = await homeQueries.getNewArrivals({ limit, skip });
   res.json({ products, page, limit, total });
 }

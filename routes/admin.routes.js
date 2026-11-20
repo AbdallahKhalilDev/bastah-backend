@@ -17,6 +17,10 @@ const {
   setShopLock,
 } = require("../controllers/adminShop.controller");
 const { listDashboardListings } = require("../controllers/listing.controller");
+const {
+  listAllProducts,
+  setProductActive,
+} = require("../controllers/adminProduct.controller");
 
 const router = express.Router();
 
@@ -50,5 +54,9 @@ router.patch("/shops/:id/lock", asyncHandler(setShopLock)); // close a shop so i
 // Items of any shop, open, closed or locked (?shop=, ?inStock=, ?staleDays=).
 // The same function as the seller's GET /api/seller/listings.
 router.get("/listings", asyncHandler(listDashboardListings));
+
+// Products (slice 17.7). Editing one is the shared PATCH /api/products/:id.
+router.get("/products", asyncHandler(listAllProducts)); // the whole catalog, hidden ones too
+router.patch("/products/:id/active", asyncHandler(setProductActive)); // hide / show a product
 
 module.exports = router;
