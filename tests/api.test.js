@@ -4327,6 +4327,117 @@ async function main() {
     r = await req("PATCH", `${areasUrl}/${beachId}`, { token: adminToken, body: { icon: "x" } });
     check("areas have no icon: it's simply ignored", r.status === 200 && r.body?.area?.icon === undefined);
 
+    // ============ Admin: every review + the site numbers (slice 17.9) ============
+    console.log("\nGET /api/admin/reviews (every review in the marketplace)");
+    const reviewsUrl = "/api/admin/reviews";
+
+    r = await req("POST", `/api/shops/${statsShopA._id}/reviews`, {
+      token: customerToken,
+      body: { rating: 2, comment: "Prices were wrong ZZFLAG" },
+    });
+    const badReviewId = r.body?.review?._id;
+    check("(setup) a 2-star review…", r.status === 201);
+    r = await req("POST", `/api/shops/${statsShopA._id}/reviews`, {
+      token: customer2Token,
+      body: { rating: 5, comment: "Great service" },
+    });
+    check("(setup) …and a 5-star one, on the same shop", r.status === 201);
+
+    r = await req("GET", reviewsUrl, { token: dashToken });
+    check("a seller → 403", r.status === 403);
+
+    r = await req("GET", reviewsUrl, { token: adminToken });
+    const newestReview = r.body?.reviews?.[0];
+    check("every review, paginated", r.status === 200 && r.body?.page === 1 && r.body?.total === (await Review.countDocuments()));
+    check("newest first", newestReview?.comment === "Great service");
+    check(
+      "the author's name AND email (the public list shows the name only), never the password",
+      newestReview?.author?.name === "Second Customer" && newestReview.author.email === "customer2@test.com" && newestReview.author.passwordHash === undefined
+    );
+    check("...and the shop's name", newestReview?.shop?.name === "Stats A");
+
+    r = await req("GET", `${reviewsUrl}?shop=${statsShopA._id}`, { token: adminToken });
+    check("?shop= → that shop's 2 reviews", r.body?.total === 2);
+    r = await req("GET", `${reviewsUrl}?rating=2`, { token: adminToken });
+    check("?rating=2 → only 2-star reviews", r.body?.total === (await Review.countDocuments({ rating: 2 })) && r.body.reviews.every((rv) => rv.rating === 2));
+    r = await req("GET", `${reviewsUrl}?q=zzflag`, { token: adminToken });
+    check("?q= searches the comment, ignoring capitals", r.body?.total === 1 && r.body.reviews[0]._id === badReviewId);
+    r = await req("GET", `${reviewsUrl}?q=(`, { token: adminToken });
+    check("?q=( is searched literally, not a 500", r.status === 200);
+    r = await req("GET", `${reviewsUrl}?rating=6`, { token: adminToken });
+    check("?rating=6 → 400", r.status === 400 && r.body?.error === "rating must be a whole number from 1 to 5");
+    r = await req("GET", `${reviewsUrl}?rating=4.5`, { token: adminToken });
+    check("?rating=4.5 → 400", r.status === 400);
+    r = await req("GET", `${reviewsUrl}?shop=banana`, { token: adminToken });
+    check("?shop=banana → 400", r.status === 400 && r.body?.error === "Invalid shop id");
+
+    r = await req("DELETE", `/api/reviews/${badReviewId}`, { token: adminToken });
+    const ratedShop = await Shop.findById(statsShopA._id);
+    check(
+      "an admin removes one with the existing DELETE /api/reviews/:id, and the rating follows",
+      r.status === 200 && ratedShop.ratingCount === 1 && ratedShop.ratingAvg === 5
+    );
+
+    console.log("\nGET /api/admin/stats (the number cards for the whole site)");
+    // One locked shop and one hidden product, so those counts aren't just 0 = 0.
+    await req("PATCH", `/api/admin/shops/${dashClosedShop._id}/lock`, { token: adminToken, body: { locked: true, reason: "Stats check" } });
+    await req("PATCH", `/api/admin/products/${jamId}/active`, { token: adminToken, body: { isActive: false } });
+
+    r = await req("GET", "/api/admin/stats", { token: dashToken });
+    check("a seller → 403", r.status === 403);
+    r = await req("GET", "/api/admin/stats", { token: adminToken });
+    const site = r.body || {};
+    check("200 with users, shops, products, reviews, orders, completedValue, topProducts, listings", r.status === 200 && ["users", "shops", "products", "reviews", "orders", "completedValue", "topProducts", "listings"].every((k) => k in site));
+
+    const [nCustomers, nSellers, nAdmins, nSuspended] = await Promise.all([
+      User.countDocuments({ role: "customer" }),
+      User.countDocuments({ role: "seller" }),
+      User.countDocuments({ role: "admin" }),
+      User.countDocuments({ status: "suspended" }),
+    ]);
+    check(
+      "users: per role, suspended, and the total",
+      site.users?.customers === nCustomers && site.users.sellers === nSellers && site.users.admins === nAdmins &&
+        site.users.suspended === nSuspended && site.users.total === nCustomers + nSellers + nAdmins
+    );
+
+    const nShops = await Shop.countDocuments();
+    const nOpen = await Shop.countDocuments({ isActive: true });
+    check(
+      "shops: total, open, closed (= total − open), locked, verified",
+      site.shops?.total === nShops && site.shops.open === nOpen && site.shops.closed === nShops - nOpen &&
+        site.shops.locked === 1 && site.shops.verified === (await Shop.countDocuments({ isVerified: true }))
+    );
+    check("products: total and hidden", site.products?.total === (await Product.countDocuments()) && site.products.hidden === 1);
+    check("reviews: total", site.reviews?.total === (await Review.countDocuments()));
+
+    const byStatusOk = await Promise.all(
+      Object.entries(site.orders?.byStatus || {}).map(async ([status, n]) => n === (await Order.countDocuments({ status })))
+    );
+    check("orders per status cover the WHOLE site", byStatusOk.length === 6 && byStatusOk.every(Boolean));
+    check("orders placed today, all shops", site.orders?.today === (await Order.countDocuments({ createdAt: { $gte: startOfGazaDay(0) } })));
+
+    const completedToday = await Order.find({ status: "completed", updatedAt: { $gte: startOfGazaDay(0) } });
+    const expectedValueToday = Math.round(completedToday.reduce((sum, o) => sum + o.total, 0) * 100) / 100;
+    check("value completed today, all shops (other sellers' ₪999 included)", site.completedValue?.today === expectedValueToday && expectedValueToday >= 999);
+    check(
+      "top products: at most 5, most sold first",
+      site.topProducts.length <= 5 && site.topProducts.every((p, i, all) => i === 0 || all[i - 1].quantity >= p.quantity)
+    );
+
+    const threeDaysAgo = new Date(Date.now() - 3 * DAY_MS);
+    check(
+      "items: total, out of stock, old prices (3 days), across every shop",
+      site.listings?.total === (await Listing.countDocuments()) &&
+        site.listings.outOfStock === (await Listing.countDocuments({ inStock: false })) &&
+        site.listings.stale === (await Listing.countDocuments({ $or: [{ priceConfirmedAt: null }, { priceConfirmedAt: { $lt: threeDaysAgo } }] })) &&
+        site.listings.staleDays === 3
+    );
+
+    // Put things back.
+    await req("PATCH", `/api/admin/shops/${dashClosedShop._id}/lock`, { token: adminToken, body: { locked: false } });
+    await req("PATCH", `/api/admin/products/${jamId}/active`, { token: adminToken, body: { isActive: true } });
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

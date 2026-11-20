@@ -11,6 +11,10 @@
 // that's fast, and a number that is never stored can never go out of date.
 const Order = require("../models/Order");
 const Listing = require("../models/Listing");
+const User = require("../models/User");
+const Shop = require("../models/Shop");
+const Product = require("../models/Product");
+const Review = require("../models/Review");
 const { ORDER_STATUSES, money } = require("./orderQueries");
 const { startOfGazaDay } = require("./gazaTime");
 const { staleFilter, DEFAULT_STALE_DAYS } = require("./sellerQueries");
@@ -161,4 +165,52 @@ async function getListingStats(filter) {
   return { total, outOfStock, stale, staleDays: DEFAULT_STALE_DAYS };
 }
 
-module.exports = { getOrderStats, getListingStats, TOP_PRODUCTS_LIMIT };
+// The counts only the ADMIN dashboard shows: accounts, shops, products and
+// reviews across the whole marketplace. Each is one countDocuments, all run side
+// by side. (Orders and items come from getOrderStats / getListingStats with an
+// empty filter, the same functions as the seller's numbers.)
+async function getSiteCounts() {
+  const [
+    customers,
+    sellers,
+    admins,
+    suspended,
+    shopsTotal,
+    shopsOpen,
+    shopsLocked,
+    shopsVerified,
+    productsTotal,
+    productsHidden,
+    reviewsTotal,
+  ] = await Promise.all([
+    User.countDocuments({ role: "customer" }),
+    User.countDocuments({ role: "seller" }),
+    User.countDocuments({ role: "admin" }),
+    User.countDocuments({ status: "suspended" }),
+    Shop.countDocuments(),
+    Shop.countDocuments({ isActive: true }),
+    // `lock: { $ne: null }` = "has a lock record" (see utils/shopLocks.js).
+    Shop.countDocuments({ lock: { $ne: null } }),
+    Shop.countDocuments({ isVerified: true }),
+    Product.countDocuments(),
+    Product.countDocuments({ isActive: false }),
+    Review.countDocuments(),
+  ]);
+
+  return {
+    users: { total: customers + sellers + admins, customers, sellers, admins, suspended },
+    // closed = every shop that isn't open, locked ones included (a locked shop
+    // is always closed). locked is the part of `closed` an admin did.
+    shops: {
+      total: shopsTotal,
+      open: shopsOpen,
+      closed: shopsTotal - shopsOpen,
+      locked: shopsLocked,
+      verified: shopsVerified,
+    },
+    products: { total: productsTotal, hidden: productsHidden },
+    reviews: { total: reviewsTotal },
+  };
+}
+
+module.exports = { getOrderStats, getListingStats, getSiteCounts, TOP_PRODUCTS_LIMIT };

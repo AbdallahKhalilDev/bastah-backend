@@ -22,6 +22,7 @@ const {
   setProductActive,
 } = require("../controllers/adminProduct.controller");
 const { categories, areas } = require("../controllers/adminLookup.controller");
+const { getSiteStats, listAllReviews } = require("../controllers/adminOverview.controller");
 
 const router = express.Router();
 
@@ -68,5 +69,10 @@ router.patch("/categories/:id", asyncHandler(categories.update)); // rename, ico
 router.get("/areas", asyncHandler(areas.list)); // hidden ones too
 router.post("/areas", asyncHandler(areas.create));
 router.patch("/areas/:id", asyncHandler(areas.update)); // rename, hide/show
+
+// Overview (slice 17.9): the site-wide number cards, and every review.
+// Removing a review is the existing DELETE /api/reviews/:id.
+router.get("/stats", asyncHandler(getSiteStats));
+router.get("/reviews", asyncHandler(listAllReviews));
 
 module.exports = router;
