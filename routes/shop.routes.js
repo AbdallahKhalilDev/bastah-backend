@@ -39,10 +39,12 @@ router.get("/:shopId/products", asyncHandler(listShopProducts));
 router.get("/:shopId/reviews", asyncHandler(listShopReviews));
 
 // Create a shop. Middleware runs left-to-right BEFORE the controller:
-//   auth                       → verifies the token, sets req.user (else 401)
-//   requireRole("seller",...)  → allows only these roles through (else 403)
-// Only then does createShop run.
-router.post("/", auth, requireRole("seller", "admin"), asyncHandler(createShop));
+//   auth                   → verifies the token, sets req.user (else 401)
+//   requireRole("seller")  → allows only sellers through (else 403)
+// Only then does createShop run. SELLERS ONLY: the new shop is owned by the
+// caller, so an admin here would end up owning it. Admins add a shop for a
+// seller with POST /api/admin/users/:id/shops.
+router.post("/", auth, requireRole("seller"), asyncHandler(createShop));
 
 // Update a shop. Same auth + role gate as create. The per-shop ownership rule
 // (a seller may edit only their OWN shop) is enforced inside the controller,

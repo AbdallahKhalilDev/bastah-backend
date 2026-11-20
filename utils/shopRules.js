@@ -1,14 +1,16 @@
 // The ONE description of what a valid shop looks like.
 //
-// Three endpoints accept shop details:
+// Four endpoints accept shop details:
 //   POST  /api/shops                  (a seller adds a shop from the dashboard)
 //   PATCH /api/shops/:id              (a seller edits their shop)
 //   POST  /api/auth/seller/register   (a new seller signs up WITH their first shop)
+//   POST  /api/admin/users/:id/shops  (an admin adds a shop for a seller)
 // They all build on these rules, so a shop can never be valid in one place and
 // invalid in another.
 const mongoose = require("mongoose");
 const { z } = require("zod");
 const Category = require("../models/Category");
+const Shop = require("../models/Shop");
 
 // Field by field. This is a WHITELIST: zod drops any key that isn't listed, so a
 // client that sends owner / isVerified / ratingAvg / ratingCount can never get
@@ -84,6 +86,31 @@ async function checkCategory(categoryId) {
   return null;
 }
 
+// Creates a shop for `ownerId` from a request body, after the same checks every
+// time. Returns { problem } (pass it to next()) or { shop }, like createAccount().
+//
+// Two endpoints add a shop, and both call this, so they can't drift apart:
+//   POST /api/shops                  a seller adds a shop; owner = the caller
+//   POST /api/admin/users/:id/shops  an admin adds one FOR a seller
+// `ownerId` always comes from the server (the token, or the URL the admin
+// chose), never from the body: the whitelist drops a body `owner`, so nobody
+// can create a shop in someone else's name.
+async function createShopFor(ownerId, body) {
+  const result = createShopSchema.safeParse(body);
+  if (!result.success) {
+    return { problem: { status: 400, message: result.error.issues[0].message } };
+  }
+  const data = result.data;
+
+  const categoryProblem = await checkCategory(data.category);
+  if (categoryProblem) {
+    return { problem: { status: 400, message: categoryProblem } };
+  }
+
+  const shop = await Shop.create({ ...data, owner: ownerId });
+  return { shop };
+}
+
 // The ONE description of how a shop's delivery zones are populated for a read
 // (each zone's area id → its name). The public shop pages AND the seller
 // dashboard use it, so the two can't show zones in different shapes.
@@ -94,5 +121,6 @@ module.exports = {
   updateShopSchema,
   signupShopSchema,
   checkCategory,
+  createShopFor,
   ZONE_POPULATE,
 };

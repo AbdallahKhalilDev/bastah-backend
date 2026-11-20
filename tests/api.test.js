@@ -3591,6 +3591,162 @@ async function main() {
         stats.listings.total === 0
     );
 
+    // ============ Admin: shops (slice 17.4) ============
+    console.log("\nPOST /api/shops is for sellers only now");
+
+    r = await req("POST", "/api/shops", { token: adminToken, body: { name: "Admin Owned", phone: "30" } });
+    check("an admin → 403 (the admin would have ended up owning the shop)", r.status === 403);
+
+    r = await req("POST", "/api/shops", {
+      token: dashToken,
+      body: { name: "Dash Third", phone: "12", owner: admin._id.toString(), isVerified: true },
+    });
+    const dashThirdId = r.body?.shop?._id;
+    check("a seller → 201, owned by the seller (a body `owner` is ignored)", r.status === 201 && r.body?.shop?.owner === dashSeller._id.toString());
+    check("...and can't make it verified on the way in", r.body?.shop?.isVerified === false);
+
+    r = await req("PATCH", `/api/shops/${dashThirdId}`, { token: dashToken, body: { isVerified: true } });
+    check("...nor afterwards with PATCH /api/shops/:id", r.status === 200 && r.body?.shop?.isVerified === false);
+
+    console.log("\nPOST /api/admin/users/:id/shops (a shop FOR a seller)");
+    const userShopsUrl = (id) => `/api/admin/users/${id}/shops`;
+
+    r = await req("POST", userShopsUrl(dashSeller._id), { token: dashToken, body: { name: "X", phone: "1" } });
+    check("a seller → 403", r.status === 403);
+
+    r = await req("POST", userShopsUrl(dashSeller._id), {
+      token: adminToken,
+      body: {
+        name: "Admin Made",
+        phone: "31",
+        area: "Zeitoun Test",
+        category: category._id.toString(),
+        owner: admin._id.toString(),
+        isVerified: true,
+      },
+    });
+    const adminMadeId = r.body?.shop?._id;
+    check("201, owned by the seller named in the URL", r.status === 201 && r.body?.shop?.owner === dashSeller._id.toString());
+    check("...not by the admin, and not verified, whatever the body says", r.body?.shop?.isVerified === false);
+
+    r = await req("GET", "/api/seller/shops", { token: dashToken });
+    check("...and it shows up in the seller's own dashboard", r.body?.shops?.some((s) => s._id === adminMadeId));
+
+    r = await req("POST", userShopsUrl(customer._id), { token: adminToken, body: { name: "X", phone: "1" } });
+    check("for a customer → 400", r.status === 400 && r.body?.error === "Only a seller can own a shop");
+    r = await req("POST", userShopsUrl(admin._id), { token: adminToken, body: { name: "X", phone: "1" } });
+    check("for an admin → 400", r.status === 400 && r.body?.error === "Only a seller can own a shop");
+    r = await req("POST", userShopsUrl("banana"), { token: adminToken, body: { name: "X", phone: "1" } });
+    check("malformed user id → 400", r.status === 400 && r.body?.error === "Invalid user id");
+    r = await req("POST", userShopsUrl(FAKE_ID), { token: adminToken, body: { name: "X", phone: "1" } });
+    check("unknown user → 404", r.status === 404 && r.body?.error === "User not found");
+    r = await req("POST", userShopsUrl(dashSeller._id), { token: adminToken, body: { phone: "1" } });
+    check("the same shop rules: no name → 400", r.status === 400 && r.body?.error === "Shop name is required");
+    r = await req("POST", userShopsUrl(dashSeller._id), { token: adminToken, body: { name: "X", phone: "1", category: "banana" } });
+    check("...a malformed category → 400", r.status === 400 && r.body?.error === "Invalid category id");
+    r = await req("POST", userShopsUrl(dashSeller._id), { token: adminToken, body: { name: "X", phone: "1", category: FAKE_ID } });
+    check("...an unknown category → 400", r.status === 400 && r.body?.error === "Category not found");
+
+    console.log("\nGET /api/admin/shops (every shop)");
+
+    r = await req("GET", "/api/admin/shops", { token: dashToken });
+    check("a seller → 403", r.status === 403);
+
+    r = await req("GET", "/api/admin/shops", { token: adminToken });
+    const adminShopsFirst = r.body?.shops?.[0];
+    check(
+      "200, paginated, counting EVERY shop (open and closed)",
+      r.status === 200 && r.body?.page === 1 && r.body?.total === (await Shop.countDocuments())
+    );
+    check("newest first", adminShopsFirst?._id === adminMadeId);
+    check(
+      "the owner comes with name, email, phone and status, and no password hash",
+      adminShopsFirst?.owner?.email === "dash-seller@test.com" &&
+        "status" in (adminShopsFirst?.owner || {}) &&
+        adminShopsFirst?.owner?.passwordHash === undefined
+    );
+    check("the category is populated", adminShopsFirst?.category?.name === "Grocery");
+
+    r = await req("GET", "/api/admin/shops?isActive=false&limit=50", { token: adminToken });
+    check(
+      "?isActive=false → only the closed shops",
+      r.body?.total === (await Shop.countDocuments({ isActive: false })) &&
+        r.body.shops.every((s) => s.isActive === false) &&
+        r.body.shops.some((s) => s.name === "Hidden Shop")
+    );
+    r = await req("GET", "/api/admin/shops?isActive=true", { token: adminToken });
+    check("?isActive=true → only the open ones", r.body?.total === (await Shop.countDocuments({ isActive: true })));
+
+    r = await req("GET", `/api/admin/shops?owner=${dashSeller._id}`, { token: adminToken });
+    check("?owner= → that seller's 4 shops, closed one included", r.body?.total === 4 && r.body.shops.some((s) => s.name === "Dash Closed"));
+
+    r = await req("GET", "/api/admin/shops?q=zeitoun", { token: adminToken });
+    check("?q= matches the area too", r.body?.total === 1 && r.body.shops[0]?.name === "Admin Made");
+    // Two closed shops have "hidden" in their name: "Hidden Shop" and the global
+    // search tests' "Zqshop Hidden". The public search would find neither.
+    r = await req("GET", "/api/admin/shops?q=hidden", { token: adminToken });
+    check(
+      "?q= finds closed shops by name (both 'hidden' ones)",
+      r.body?.total === 2 &&
+        r.body.shops.every((s) => s.isActive === false) &&
+        r.body.shops.some((s) => s.name === "Hidden Shop")
+    );
+    r = await req("GET", "/api/admin/shops?q=(", { token: adminToken });
+    check("?q=( is searched literally, not a 500", r.status === 200);
+
+    r = await req("GET", "/api/admin/shops?isActive=maybe", { token: adminToken });
+    check("?isActive=maybe → 400", r.status === 400 && r.body?.error === "isActive must be true or false");
+    r = await req("GET", "/api/admin/shops?isVerified=1", { token: adminToken });
+    check("?isVerified=1 → 400", r.status === 400 && r.body?.error === "isVerified must be true or false");
+    r = await req("GET", "/api/admin/shops?owner=abc", { token: adminToken });
+    check("?owner=abc → 400", r.status === 400 && r.body?.error === "Invalid owner id");
+
+    r = await req("GET", "/api/admin/shops?limit=2&page=2", { token: adminToken });
+    check("pagination: 2 per page, total unchanged", r.body?.shops?.length === 2 && r.body?.total === (await Shop.countDocuments()));
+
+    console.log("\nPATCH /api/admin/shops/:id/verify (the verified badge)");
+    const verifyUrl = (id) => `/api/admin/shops/${id}/verify`;
+
+    r = await req("PATCH", verifyUrl(dashOpenShop._id), { token: dashToken, body: { isVerified: true } });
+    check("a seller → 403 (they can't verify themselves)", r.status === 403);
+    r = await req("PATCH", verifyUrl("banana"), { token: adminToken, body: { isVerified: true } });
+    check("malformed shop id → 400", r.status === 400 && r.body?.error === "Invalid shop id");
+    r = await req("PATCH", verifyUrl(FAKE_ID), { token: adminToken, body: { isVerified: true } });
+    check("unknown shop → 404", r.status === 404);
+    r = await req("PATCH", verifyUrl(dashOpenShop._id), { token: adminToken, body: {} });
+    check("no isVerified → 400", r.status === 400 && r.body?.error === "isVerified must be true or false");
+    r = await req("PATCH", verifyUrl(dashOpenShop._id), { token: adminToken, body: { isVerified: "yes" } });
+    check("isVerified: \"yes\" → 400 (must be a real true/false)", r.status === 400);
+
+    r = await req("PATCH", verifyUrl(dashOpenShop._id), { token: adminToken, body: { isVerified: true } });
+    check("verify → 200, isVerified true", r.status === 200 && r.body?.shop?.isVerified === true);
+    check("...the reply has the same shape as the list (owner's email)", r.body?.shop?.owner?.email === "dash-seller@test.com");
+
+    r = await req("GET", `/api/shops/${dashOpenShop._id}`);
+    check("customers see the badge on the shop page", r.body?.shop?.isVerified === true);
+    r = await req("GET", `/api/products/${dashP1._id}/listings`);
+    const badgeRows = r.body?.listings || [];
+    check(
+      "...and in the price comparison (verified shop true, the other false)",
+      badgeRows.find((l) => l.shop?.name === "Dash Open")?.shop?.isVerified === true &&
+        badgeRows.find((l) => l.shop?.name === "Other Shop")?.shop?.isVerified === false
+    );
+    r = await req("GET", "/api/seller/shops", { token: dashToken });
+    check("...and the seller sees it in their dashboard", r.body?.shops?.find((s) => s.name === "Dash Open")?.isVerified === true);
+
+    r = await req("GET", "/api/admin/shops?isVerified=true", { token: adminToken });
+    check("?isVerified=true → the verified shops", r.body?.total === (await Shop.countDocuments({ isVerified: true })) && r.body.shops.some((s) => s.name === "Dash Open"));
+
+    r = await req("PATCH", verifyUrl(dashOpenShop._id), { token: adminToken, body: { isVerified: true } });
+    check("verifying twice is fine → 200, still true", r.status === 200 && r.body?.shop?.isVerified === true);
+    r = await req("PATCH", verifyUrl(dashClosedShop._id), { token: adminToken, body: { isVerified: true } });
+    check("a closed shop can be verified too", r.status === 200 && r.body?.shop?.isVerified === true);
+
+    r = await req("PATCH", verifyUrl(dashOpenShop._id), { token: adminToken, body: { isVerified: false } });
+    check("un-verify → 200, isVerified false", r.status === 200 && r.body?.shop?.isVerified === false);
+    r = await req("GET", `/api/shops/${dashOpenShop._id}`);
+    check("...and the badge is gone from the shop page", r.body?.shop?.isVerified === false);
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

@@ -12,6 +12,7 @@ const { z } = require("zod");
 const Shop = require("../models/Shop");
 const Listing = require("../models/Listing");
 const parsePagination = require("../utils/pagination");
+const parseBooleanQuery = require("../utils/booleanQuery");
 const { ZONE_POPULATE } = require("../utils/shopRules");
 const {
   shopFilter,
@@ -79,14 +80,14 @@ async function listMyListings(req, res, next) {
     return next(problem);
   }
 
-  // Query values always arrive as TEXT, so ?inStock=false is the string "false",
-  // not the boolean false. We turn the two valid words into a real boolean and
-  // reject anything else (a typo shouldn't silently show every item).
-  if (req.query.inStock) {
-    if (req.query.inStock !== "true" && req.query.inStock !== "false") {
-      return next({ status: 400, message: "inStock must be true or false" });
-    }
-    filter.inStock = req.query.inStock === "true";
+  // ?inStock=true|false. The text "false" must become the boolean false, and a
+  // typo is a 400 (see utils/booleanQuery.js).
+  const inStock = parseBooleanQuery(req.query.inStock, "inStock");
+  if (inStock.problem) {
+    return next(inStock.problem);
+  }
+  if (inStock.value !== undefined) {
+    filter.inStock = inStock.value;
   }
 
   // Newest first by default. For the old-prices view: oldest confirmation first.

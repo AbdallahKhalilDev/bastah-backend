@@ -9,7 +9,9 @@ const {
   updateUser,
   setUserPassword,
   setUserStatus,
+  createUserShop,
 } = require("../controllers/admin.controller");
+const { listAllShops, setShopVerified } = require("../controllers/adminShop.controller");
 
 const router = express.Router();
 
@@ -33,5 +35,10 @@ router.get("/users/:id", asyncHandler(getUser));
 router.patch("/users/:id", asyncHandler(updateUser)); // name, email, phone
 router.patch("/users/:id/password", asyncHandler(setUserPassword)); // never your own
 router.patch("/users/:id/status", asyncHandler(setUserStatus)); // never your own
+router.post("/users/:id/shops", asyncHandler(createUserShop)); // a shop FOR this seller
+
+// Shops (slice 17.4). Editing a shop's details is the existing PATCH /api/shops/:id.
+router.get("/shops", asyncHandler(listAllShops)); // every shop, closed ones too
+router.patch("/shops/:id/verify", asyncHandler(setShopVerified)); // the "verified" badge
 
 module.exports = router;

@@ -11,9 +11,9 @@ const homeQueries = require("../utils/homeQueries");
 // WHITELISTS: owner / isVerified / ratingAvg / ratingCount are silently dropped,
 // so they can never reach the database. `owner` comes from the login token.
 const {
-  createShopSchema,
   updateShopSchema,
   checkCategory,
+  createShopFor,
   ZONE_POPULATE,
 } = require("../utils/shopRules");
 
@@ -126,33 +126,23 @@ async function getShop(req, res, next) {
 }
 
 // POST /api/shops
-// Protected: only a logged-in seller or admin reaches here (auth + requireRole
-// run first, in the route). Creates a shop owned by the caller.
+// Protected: SELLERS only (auth + requireRole run first, in the route). Creates
+// a shop owned by the caller.
+//
+// Admins used to be allowed here too, but then the shop was owned by the ADMIN,
+// since the owner is always "whoever is calling". An admin adds a shop for a
+// seller with POST /api/admin/users/:id/shops instead.
 async function createShop(req, res, next) {
-  // 1. Validate the body against the whitelist. safeParse doesn't throw — it
-  //    returns success/error so we can craft our own readable 400.
-  const result = createShopSchema.safeParse(req.body);
-  if (!result.success) {
-    const message = result.error.issues[0].message;
-    return next({ status: 400, message });
-  }
-  const data = result.data;
-
-  // 2. If a category was provided, make sure it's a real one (the shared check
-  //    in utils/shopRules.js). A bad or unknown category is the caller's bad
-  //    input, so it's a 400. When category is omitted the check passes.
-  const categoryProblem = await checkCategory(data.category);
-  if (categoryProblem) {
-    return next({ status: 400, message: categoryProblem });
+  // The checks (whitelist, category) and the save are in createShopFor(), shared
+  // with the admin's endpoint. CRITICAL: the owner is the verified caller from
+  // the token (req.user.id), never something from the body.
+  const { problem, shop } = await createShopFor(req.user.id, req.body);
+  if (problem) {
+    return next(problem);
   }
 
-  // 3. Create the shop. CRITICAL: owner comes from the verified token
-  //    (req.user.id set by the `auth` middleware), never from the body — a
-  //    client must not be able to create a shop "owned" by someone else.
-  const shop = await Shop.create({ ...data, owner: req.user.id });
-
-  // 4. Respond 201 (Created). owner/category appear here as raw ids; the read
-  //    endpoints (Slice 2) are where we .populate() them into full documents.
+  // 201 (Created). owner/category appear here as raw ids; the read endpoints
+  // are where we .populate() them into full documents.
   res.status(201).json({ shop });
 }
 

@@ -244,7 +244,7 @@ async function listProductListings(req, res, next) {
   //    loaded, so there's no way to leak their email/credentials.
   const listings = await Listing.find({ product: req.params.id })
     .sort({ price: 1 })
-    .populate("shop", "name area phone ratingAvg ratingCount isActive");
+    .populate("shop", "name area phone ratingAvg ratingCount isVerified isActive");
 
   // 3. Keep only listings whose shop is still active (hide prices from
   //    deactivated shops), and — importantly — a listing whose shop was deleted
@@ -267,6 +267,9 @@ async function listProductListings(req, res, next) {
         phone: l.shop.phone,
         ratingAvg: l.shop.ratingAvg,
         ratingCount: l.shop.ratingCount,
+        // The admin-given "verified" badge, so customers comparing prices can
+        // see which shops an admin has checked.
+        isVerified: l.shop.isVerified,
       },
     }));
 

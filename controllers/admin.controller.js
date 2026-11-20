@@ -5,7 +5,7 @@ const User = require("../models/User");
 const Shop = require("../models/Shop");
 const parsePagination = require("../utils/pagination");
 const escapeRegex = require("../utils/escapeRegex");
-const { signupShopSchema } = require("../utils/shopRules");
+const { signupShopSchema, createShopFor } = require("../utils/shopRules");
 const {
   ROLES,
   STATUSES,
@@ -312,6 +312,30 @@ async function setUserStatus(req, res, next) {
   res.json({ user: adminUser(user) });
 }
 
+// POST /api/admin/users/:id/shops
+// An admin adds a shop FOR this seller. The body is exactly what a seller sends
+// to POST /api/shops, and it goes through the very same createShopFor(), so
+// the same rules apply. The difference is only WHO the owner is: here it's the
+// seller named in the URL, not the caller.
+// Only sellers own shops: a customer or an admin here is a 400.
+async function createUserShop(req, res, next) {
+  const { problem, user } = await loadUser(req.params.id);
+  if (problem) {
+    return next(problem);
+  }
+
+  if (user.role !== "seller") {
+    return next({ status: 400, message: "Only a seller can own a shop" });
+  }
+
+  const created = await createShopFor(user._id, req.body);
+  if (created.problem) {
+    return next(created.problem);
+  }
+
+  res.status(201).json({ shop: created.shop });
+}
+
 module.exports = {
   listUsers,
   getUser,
@@ -319,4 +343,5 @@ module.exports = {
   updateUser,
   setUserPassword,
   setUserStatus,
+  createUserShop,
 };
