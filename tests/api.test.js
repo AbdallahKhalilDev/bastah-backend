@@ -3427,6 +3427,170 @@ async function main() {
     check("the confirmed shop shows a recent date", isRecent(dashRow?.priceConfirmedAt));
     check("a never-confirmed price shows null", otherRow?.priceConfirmedAt === null);
 
+    // ============ Gaza time (slice 17.3) ============
+    // Fixed moments, so these never depend on when the tests run.
+    console.log("\nutils/gazaTime: when does a day start in Gaza?");
+    const { startOfGazaDay } = require("../utils/gazaTime");
+    const gazaStart = (daysAgo, now) => startOfGazaDay(daysAgo, new Date(now)).toISOString();
+
+    check(
+      "23:30 UTC is already 01:30 the next day in Gaza (winter, UTC+2)",
+      gazaStart(0, "2026-11-19T23:30:00Z") === "2026-11-19T22:00:00.000Z"
+    );
+    check("21:30 UTC is still 23:30 the same day in Gaza", gazaStart(0, "2026-11-19T21:30:00Z") === "2026-11-18T22:00:00.000Z");
+    check("in summer (UTC+3) Gaza midnight is 21:00 UTC", gazaStart(0, "2026-07-15T12:00:00Z") === "2026-07-14T21:00:00.000Z");
+    check("6 days back crosses into the previous month", gazaStart(6, "2026-12-03T10:00:00Z") === "2026-11-26T22:00:00.000Z");
+    check(
+      "counting back across the end of summer time uses the summer offset",
+      gazaStart(3, "2026-10-25T10:00:00Z") === "2026-10-21T21:00:00.000Z"
+    );
+    check("exactly midnight in Gaza is the start of that day", gazaStart(0, "2026-11-19T22:00:00Z") === "2026-11-19T22:00:00.000Z");
+
+    // ============ Seller dashboard: number cards (slice 17.3) ============
+    // A fresh seller with two shops, and orders placed at KNOWN moments around
+    // Gaza midnight, so every number below has one exact right answer.
+    console.log("\nGET /api/seller/stats (the number cards)");
+
+    const statsSeller = await User.create({
+      name: "Stats Seller",
+      email: "stats-seller@test.com",
+      passwordHash: "x",
+      role: "seller",
+    });
+    const statsToken = tokenFor(statsSeller);
+    const statsShopA = await Shop.create({ owner: statsSeller._id, name: "Stats A", phone: "20" });
+    const statsShopB = await Shop.create({ owner: statsSeller._id, name: "Stats B", phone: "21" });
+    // Created in this order, so their ids are in this order too (ties sort by id).
+    const [sRice, sOil, sTea, sSugar] = await Product.create([
+      { name: "Stats Rice", nameAr: "أرز", category: category._id, unit: "1kg" },
+      { name: "Stats Oil", nameAr: "زيت", category: category._id },
+      { name: "Stats Tea", nameAr: "شاي", category: category._id },
+      { name: "Stats Sugar", nameAr: "سكر", category: category._id },
+    ]);
+    // Items: rice + tea confirmed now · oil out of stock, never confirmed ·
+    // sugar (shop B) confirmed 5 days ago. So 4 items, 1 out of stock, 2 old.
+    const sRiceL = await Listing.create({ shop: statsShopA._id, product: sRice._id, price: 10, priceConfirmedAt: new Date() });
+    const sOilL = await Listing.create({ shop: statsShopA._id, product: sOil._id, price: 20, inStock: false });
+    const sTeaL = await Listing.create({ shop: statsShopA._id, product: sTea._id, price: 2, priceConfirmedAt: new Date() });
+    const sSugarL = await Listing.create({ shop: statsShopB._id, product: sSugar._id, price: 19.99, priceConfirmedAt: daysAgo(5) });
+
+    const minutesAfter = (date, minutes) => new Date(date.getTime() + minutes * 60 * 1000);
+    const todayStart = startOfGazaDay(0);
+
+    // lines = [[listing, product, quantity, price], ...]
+    async function makeOrder(shop, status, lines, createdAt, updatedAt = createdAt) {
+      const items = lines.map(([listing, product, quantity, price]) => ({
+        listing: listing._id,
+        product: product._id,
+        productName: product.name,
+        productNameAr: product.nameAr,
+        unit: product.unit,
+        priceAtOrder: price,
+        quantity,
+      }));
+      const subtotal = items.reduce((sum, i) => sum + i.priceAtOrder * i.quantity, 0);
+      const order = await Order.create({
+        customer: customer._id,
+        shop: shop._id,
+        items,
+        subtotal,
+        total: subtotal,
+        status,
+        contactPhone: "1",
+      });
+      // Mongoose stamps createdAt/updatedAt with "now" itself. To put an order in
+      // the past we overwrite them through the raw MongoDB collection, which
+      // skips Mongoose (and its timestamps) entirely.
+      await Order.collection.updateOne({ _id: order._id }, { $set: { createdAt, updatedAt } });
+      return order;
+    }
+
+    // Shop A
+    await makeOrder(statsShopA, "pending", [[sRiceL, sRice, 1, 10]], minutesAfter(todayStart, 1)); // placed today
+    await makeOrder(
+      statsShopA, "completed", [[sRiceL, sRice, 3, 10], [sOilL, sOil, 1, 20]], // ₪50
+      minutesAfter(startOfGazaDay(2), 600), minutesAfter(todayStart, 2) // placed 2 days ago, completed today
+    );
+    await makeOrder(
+      statsShopA, "completed", [[sRiceL, sRice, 2, 12.75]], // ₪25.50
+      minutesAfter(startOfGazaDay(10), 60), minutesAfter(startOfGazaDay(5), 60) // completed 5 days ago
+    );
+    await makeOrder(statsShopA, "cancelled", [[sOilL, sOil, 10, 4]], minutesAfter(todayStart, -30)); // 23:30 YESTERDAY in Gaza
+    await makeOrder(
+      statsShopA, "completed", [[sTeaL, sTea, 50, 2]], // ₪100, but long ago
+      minutesAfter(startOfGazaDay(40), 60), minutesAfter(startOfGazaDay(35), 60)
+    );
+    // Shop B
+    await makeOrder(statsShopB, "accepted", [[sSugarL, sSugar, 1, 15]], minutesAfter(startOfGazaDay(3), 60));
+    await makeOrder(statsShopB, "completed", [[sSugarL, sSugar, 1, 19.99]], minutesAfter(todayStart, 3), minutesAfter(todayStart, 4));
+    // Someone else's shop: a big completed order today that must never count.
+    await makeOrder(otherShop, "completed", [[notMineListing, dashP1, 1, 999]], minutesAfter(todayStart, 5));
+
+    r = await req("GET", "/api/seller/stats", { token: customerToken });
+    check("a customer → 403", r.status === 403);
+    r = await req("GET", "/api/seller/stats", { token: adminToken });
+    check("an admin → 403 (admins get their own numbers later)", r.status === 403);
+
+    r = await req("GET", "/api/seller/stats", { token: statsToken });
+    let stats = r.body || {};
+    check("200 with { orders, completedValue, topProducts, listings }", r.status === 200 && stats.orders && stats.completedValue && Array.isArray(stats.topProducts) && stats.listings);
+    check(
+      "orders per status, all time, all 6 keys",
+      JSON.stringify(stats.orders?.byStatus) ===
+        JSON.stringify({ pending: 1, accepted: 1, ready: 0, delivering: 0, completed: 4, cancelled: 1 })
+    );
+    check("placed today → 2", stats.orders?.today === 2);
+    check("...the one at 23:30 last night (Gaza) is NOT today", stats.orders?.today === 2 && stats.orders?.last7Days === 5);
+    check("placed in the last 7 days → 5", stats.orders?.last7Days === 5);
+    check("placed in the last 30 days → 6 (the 40-day-old one isn't)", stats.orders?.last30Days === 6);
+    check("value completed today → ₪69.99 (50 + 19.99)", stats.completedValue?.today === 69.99);
+    check("...last 7 days → ₪95.49 (adds the one completed 5 days ago)", stats.completedValue?.last7Days === 95.49);
+    check("...last 30 days → ₪95.49 (the one from 35 days ago is out)", stats.completedValue?.last30Days === 95.49);
+    check("pending, accepted and cancelled orders add NO value (or 69.99 would be higher)", stats.completedValue?.today === 69.99);
+    check("someone else's ₪999 order never counts", stats.completedValue?.today < 999);
+    check(
+      "top products: completed orders of the last 30 days, most sold first",
+      stats.topProducts.map((p) => `${p.productName}:${p.quantity}`).join(",") === "Stats Rice:5,Stats Oil:1,Stats Sugar:1"
+    );
+    check("...the cancelled 10 oil and the old 50 tea don't count", !stats.topProducts.some((p) => p.productName === "Stats Tea") && stats.topProducts[1]?.quantity === 1);
+    check(
+      "...each shows the product id, both names and the unit",
+      stats.topProducts[0]?.product === sRice._id.toString() && stats.topProducts[0]?.productNameAr === "أرز" && stats.topProducts[0]?.unit === "1kg"
+    );
+    check(
+      "item cards: 4 items, 1 out of stock, 2 old prices (3 days)",
+      JSON.stringify(stats.listings) === JSON.stringify({ total: 4, outOfStock: 1, stale: 2, staleDays: 3 })
+    );
+
+    r = await req("GET", `/api/seller/stats?shop=${statsShopB._id}`, { token: statsToken });
+    stats = r.body || {};
+    check(
+      "?shop= one shop: only its orders",
+      r.status === 200 && stats.orders?.byStatus?.accepted === 1 && stats.orders?.byStatus?.completed === 1 && stats.orders?.byStatus?.pending === 0
+    );
+    check("...placed today 1, last 7 days 2", stats.orders?.today === 1 && stats.orders?.last7Days === 2);
+    check("...value today ₪19.99", stats.completedValue?.today === 19.99);
+    check("...top products: only sugar", stats.topProducts.length === 1 && stats.topProducts[0]?.productName === "Stats Sugar");
+    check("...its items: 1 item, 1 old price", stats.listings?.total === 1 && stats.listings?.stale === 1 && stats.listings?.outOfStock === 0);
+
+    r = await req("GET", `/api/seller/stats?shop=${otherShop._id}`, { token: statsToken });
+    check("?shop= someone else's shop → 403", r.status === 403);
+    r = await req("GET", "/api/seller/stats?shop=banana", { token: statsToken });
+    check("?shop= malformed → 400", r.status === 400 && r.body?.error === "Invalid shop id");
+
+    r = await req("GET", "/api/seller/stats", { token: tokenFor(shoplessSeller) });
+    stats = r.body || {};
+    check(
+      "a seller with no shops → zeros everywhere, not an error",
+      r.status === 200 &&
+        Object.values(stats.orders?.byStatus || { x: 1 }).every((n) => n === 0) &&
+        Object.keys(stats.orders.byStatus).length === 6 &&
+        stats.orders.today === 0 &&
+        stats.completedValue.last30Days === 0 &&
+        stats.topProducts.length === 0 &&
+        stats.listings.total === 0
+    );
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

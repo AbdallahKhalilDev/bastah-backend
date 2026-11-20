@@ -38,8 +38,15 @@ async function shopFilter(user, shopParam) {
     return { problem: { status: 400, message: "Invalid shop id" } };
   }
 
+  // The id arrives as TEXT. find() and countDocuments() quietly turn text into
+  // an ObjectId (Mongoose "casts" it, using the schema), but aggregate() does
+  // NOT: it sends the filter to MongoDB exactly as written, and the text "65a…"
+  // never equals the ObjectId 65a…. The seller's numbers use aggregate(), so we
+  // convert the id here, once, for every caller.
+  const shopId = shopParam ? new mongoose.Types.ObjectId(shopParam) : null;
+
   if (user.role === "admin") {
-    return { filter: shopParam ? { shop: shopParam } : {} };
+    return { filter: shopId ? { shop: shopId } : {} };
   }
 
   const myShopIds = await getMyShopIds(user.id);
@@ -52,13 +59,15 @@ async function shopFilter(user, shopParam) {
   if (!isMine) {
     return { problem: { status: 403, message: "Forbidden" } };
   }
-  return { filter: { shop: shopParam } };
+  return { filter: { shop: shopId } };
 }
 
 // --- Old prices -----------------------------------------------------------
 // ?staleDays= on the seller's item list must be a whole number in this range.
 const MIN_STALE_DAYS = 1;
 const MAX_STALE_DAYS = 60;
+// What the dashboard's "old prices" card counts when nobody chose a number.
+const DEFAULT_STALE_DAYS = 3;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // The ONE rule for "this price may be out of date": the seller hasn't confirmed
@@ -83,4 +92,5 @@ module.exports = {
   staleFilter,
   MIN_STALE_DAYS,
   MAX_STALE_DAYS,
+  DEFAULT_STALE_DAYS,
 };

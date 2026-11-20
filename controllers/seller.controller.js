@@ -19,6 +19,7 @@ const {
   MIN_STALE_DAYS,
   MAX_STALE_DAYS,
 } = require("../utils/sellerQueries");
+const { getOrderStats, getListingStats } = require("../utils/statsQueries");
 
 // The whitelist for "these prices are still right". Exactly ONE of the two
 // keys is allowed (checked in the controller):
@@ -176,4 +177,26 @@ async function confirmPrices(req, res, next) {
   res.json({ confirmed: update.matchedCount });
 }
 
-module.exports = { listMyShops, listMyListings, confirmPrices };
+// GET /api/seller/stats
+// The dashboard's number cards, for all my shops, or one with ?shop=<id>:
+//   { orders, completedValue, topProducts, listings }
+// Every number is worked out in utils/statsQueries.js. This function only
+// decides WHICH shops count. The admin's numbers (later) will call the same
+// helpers with an empty filter, so both dashboards count the same way.
+async function getMyStats(req, res, next) {
+  const { problem, filter } = await shopFilter(req.user, req.query.shop);
+  if (problem) {
+    return next(problem);
+  }
+
+  const [orderStats, listings] = await Promise.all([
+    getOrderStats(filter),
+    getListingStats(filter),
+  ]);
+
+  // Cards only for now. If a daily chart is agreed with the frontend later, it
+  // becomes one NEW key here, and nothing that already exists changes.
+  res.json({ ...orderStats, listings });
+}
+
+module.exports = { listMyShops, listMyListings, confirmPrices, getMyStats };
