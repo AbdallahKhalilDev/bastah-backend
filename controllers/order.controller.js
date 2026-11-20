@@ -105,7 +105,9 @@ async function createOrder(req, res, next) {
       return next({ status: 400, message: "Invalid area id" });
     }
     area = await Area.findById(data.address.area);
-    if (!area) {
+    // An area an admin has hidden is no longer offered (GET /api/areas leaves it
+    // out), so nobody can order delivery to it, even where a shop still lists it.
+    if (!area || area.isActive === false) {
       return next({ status: 400, message: "Area not found" });
     }
   }

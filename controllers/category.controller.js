@@ -24,7 +24,9 @@ async function getCategory(req, res, next) {
 
   // 2. Look it up. A well-formed id that matches nothing returns null — that's
   //    a 404 (the id was shaped correctly but no such category exists).
-  const category = await Category.findById(req.params.id);
+  // A category an admin hid is a 404 here, like a hidden product or a closed
+  // shop: it's gone from the menu, so it has no public page either.
+  const category = await Category.findOne({ _id: req.params.id, isActive: true });
   if (!category) {
     return next({ status: 404, message: "Category not found" });
   }

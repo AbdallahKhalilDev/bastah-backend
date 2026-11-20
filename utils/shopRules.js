@@ -72,16 +72,32 @@ const signupShopSchema = z.object(
 // Only `undefined` means "not sent". An empty string "" IS sent, and is not a
 // valid id, so it gets "Invalid category id" (before, it reached the database
 // and came back as a 500).
-async function checkCategory(categoryId) {
+//
+// Used for shops AND products (create and edit).
+//
+// A category an admin has HIDDEN can't be chosen. But `currentId`, the category
+// the shop or product ALREADY has (edits only), is always fine to keep, even if
+// it's hidden since: a form that sends every field back must not suddenly fail,
+// and things already in a hidden category simply keep it.
+async function checkCategory(categoryId, currentId = null) {
   if (categoryId === undefined) return null;
 
   // Check the id is well-formed first, or Mongoose would throw a CastError.
   if (!mongoose.Types.ObjectId.isValid(categoryId)) {
     return "Invalid category id";
   }
-  const exists = await Category.exists({ _id: categoryId });
-  if (!exists) {
+
+  // Keeping the category it already has: always fine.
+  if (currentId && currentId.toString() === categoryId) {
+    return null;
+  }
+
+  const category = await Category.findById(categoryId).select("isActive");
+  if (!category) {
     return "Category not found";
+  }
+  if (category.isActive === false) {
+    return "This category is no longer available";
   }
   return null;
 }

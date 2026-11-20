@@ -254,8 +254,9 @@ async function updateProduct(req, res, next) {
   }
   const data = result.data;
 
-  // Only when a new category is sent (checkCategory passes on undefined).
-  const categoryProblem = await checkCategory(data.category);
+  // Only when a category is sent (checkCategory passes on undefined). Keeping
+  // the one it already has is fine, even if an admin hid that category since.
+  const categoryProblem = await checkCategory(data.category, product.category);
   if (categoryProblem) {
     return next({ status: 400, message: categoryProblem });
   }

@@ -1,7 +1,9 @@
 // Seeds the fixed list of Gaza areas. Same shape as categories.seed.js, and
-// IDEMPOTENT for the same reason: we "upsert" on the slug (update the row if that
-// slug exists, otherwise insert it), so running this twice leaves the database in
-// exactly the same state instead of creating duplicates.
+// IDEMPOTENT for the same reason: we "upsert" on the slug (leave the row alone if
+// that slug exists, otherwise insert it), so running this twice leaves the
+// database in exactly the same state instead of creating duplicates. Since admins
+// can rename and hide areas from the dashboard (Step 17), this only ADDS missing
+// ones.
 //
 // Run it with:  npm run seed:areas
 
@@ -61,13 +63,16 @@ async function seedAreas() {
 
     // findOneAndUpdate with upsert: true is the idempotent part.
     //  - filter { slug }: look for an existing area with this slug.
-    //  - $set: the fields to write (on both update and insert).
+    //  - $setOnInsert: the fields to write ONLY when creating a new one. An
+    //    existing area is left exactly as it is. (It used to be $set, which
+    //    rewrote the names on every run, and that would undo an admin's rename
+    //    from the dashboard, Step 17.)
     //  - upsert: true: if none was found, create one.
     //  - setDefaultsOnInsert: apply the schema defaults (isActive: true) on
     //    insert. On insert, slug is taken from the filter automatically.
     await Area.findOneAndUpdate(
       { slug },
-      { $set: { name: area.name, nameAr: area.nameAr } },
+      { $setOnInsert: { name: area.name, nameAr: area.nameAr } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
   }

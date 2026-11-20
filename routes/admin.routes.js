@@ -21,6 +21,7 @@ const {
   listAllProducts,
   setProductActive,
 } = require("../controllers/adminProduct.controller");
+const { categories, areas } = require("../controllers/adminLookup.controller");
 
 const router = express.Router();
 
@@ -58,5 +59,14 @@ router.get("/listings", asyncHandler(listDashboardListings));
 // Products (slice 17.7). Editing one is the shared PATCH /api/products/:id.
 router.get("/products", asyncHandler(listAllProducts)); // the whole catalog, hidden ones too
 router.patch("/products/:id/active", asyncHandler(setProductActive)); // hide / show a product
+
+// Categories and areas (slice 17.8): the same three endpoints for each, built
+// by one factory. Hide with PATCH { isActive: false }; never deleted.
+router.get("/categories", asyncHandler(categories.list)); // hidden ones too
+router.post("/categories", asyncHandler(categories.create));
+router.patch("/categories/:id", asyncHandler(categories.update)); // rename, icon, hide/show
+router.get("/areas", asyncHandler(areas.list)); // hidden ones too
+router.post("/areas", asyncHandler(areas.create));
+router.patch("/areas/:id", asyncHandler(areas.update)); // rename, hide/show
 
 module.exports = router;

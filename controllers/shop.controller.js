@@ -184,7 +184,8 @@ async function updateShop(req, res, next) {
 
   // 5. If they're changing the category, verify the new one exists (same shared
   //    check as create). Omitting category leaves the current one untouched.
-  const categoryProblem = await checkCategory(data.category);
+  // (Keeping the category it already has is fine, even if it was hidden since.)
+  const categoryProblem = await checkCategory(data.category, shop.category);
   if (categoryProblem) {
     return next({ status: 400, message: categoryProblem });
   }
@@ -289,10 +290,25 @@ async function updateDeliveryZones(req, res, next) {
       return next({ status: 400, message: "Duplicate delivery zone" });
     }
     seen.add(zone.area);
+  }
 
-    const area = await Area.findById(zone.area);
+  //    Then load ALL the areas in ONE query ($in = "any of these ids"), instead
+  //    of one query per zone (up to 60), and look each one up in a Map.
+  const areas = await Area.find({ _id: { $in: [...seen] } });
+  const areaById = new Map(areas.map((a) => [a._id.toString(), a]));
+
+  //    An area an admin has HIDDEN can't be ADDED to a shop's zones. A zone the
+  //    shop ALREADY has may stay (the whole list is sent back on every save, so
+  //    refusing it would block every other change); customers just can't use it
+  //    at checkout.
+  const currentAreaIds = new Set(shop.deliveryZones.map((z) => z.area.toString()));
+  for (const zone of data.zones) {
+    const area = areaById.get(zone.area);
     if (!area) {
       return next({ status: 400, message: "Area not found" });
+    }
+    if (area.isActive === false && !currentAreaIds.has(zone.area)) {
+      return next({ status: 400, message: `${area.name} is no longer a delivery area` });
     }
   }
 

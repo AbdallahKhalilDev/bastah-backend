@@ -4,8 +4,9 @@
 //
 // This script is IDEMPOTENT: running it twice leaves the database in the same
 // state — it will NOT create duplicates. We achieve that by "upserting" on the
-// slug (update the row if that slug already exists, otherwise insert it),
-// instead of blindly inserting new rows every time.
+// slug (leave the row alone if that slug already exists, otherwise insert it),
+// instead of blindly inserting new rows every time. Since admins can rename and
+// hide categories from the dashboard (Step 17), this only ADDS missing ones.
 
 require("dotenv").config();
 const mongoose = require("mongoose");
@@ -32,13 +33,16 @@ async function seedCategories() {
 
     // findOneAndUpdate with upsert: true is the idempotent part.
     //  - filter { slug }: look for an existing category with this slug.
-    //  - $set: the fields to write (on both update and insert).
+    //  - $setOnInsert: the fields to write ONLY when creating a new one. An
+    //    existing category is left exactly as it is. (It used to be $set, which
+    //    rewrote the names on every run, and that would undo an admin's rename
+    //    from the dashboard, Step 17.)
     //  - upsert: true: if none was found, create one.
     //  - setDefaultsOnInsert: apply the schema defaults (isActive: true) on
     //    insert. On insert, slug is taken from the filter automatically.
     await Category.findOneAndUpdate(
       { slug },
-      { $set: { name: cat.name, nameAr: cat.nameAr, parent: null } },
+      { $setOnInsert: { name: cat.name, nameAr: cat.nameAr, parent: null } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
   }

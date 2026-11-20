@@ -4174,6 +4174,159 @@ async function main() {
     check("...and it's featured again (the flag was kept)", r.body.products.some((p) => p._id === soapId));
     await req("DELETE", "/api/cart", { token: customer2Token });
 
+    // ============ Admin: categories and areas (slice 17.8) ============
+    console.log("\n/api/admin/categories (add, rename, hide)");
+    const catsUrl = "/api/admin/categories";
+
+    r = await req("GET", catsUrl, { token: dashToken });
+    check("a seller → 403", r.status === 403);
+
+    r = await req("GET", catsUrl, { token: adminToken });
+    const adminCats = r.body?.categories || [];
+    check("every category, hidden ones too", r.status === 200 && adminCats.length === (await Category.countDocuments()) && adminCats.some((c) => c.name === "Zqcat Hidden" && c.isActive === false));
+    check("A→Z by name", adminCats.map((c) => c.name).join("|") === [...adminCats.map((c) => c.name)].sort().join("|"));
+    check(
+      "each shows how many products are in it",
+      adminCats.find((c) => c.name === "Grocery")?.productCount === (await Product.countDocuments({ category: category._id }))
+    );
+
+    r = await req("POST", catsUrl, { token: adminToken, body: { name: "Baby Care", nameAr: "العناية بالطفل", icon: "baby", slug: "hack" } });
+    const babyCatId = r.body?.category?._id;
+    check("add → 201, the slug is made from the name (a body slug is ignored)", r.status === 201 && r.body?.category?.slug === "baby-care" && r.body.category.isActive === true);
+    r = await req("GET", "/api/categories");
+    check("...and it's in the public menu at once", r.body?.categories?.some((c) => c._id === babyCatId));
+
+    r = await req("POST", catsUrl, { token: adminToken, body: { name: "baby care!", nameAr: "x" } });
+    check("a name with the same slug → 409", r.status === 409 && r.body?.error === "That name is already used by another category");
+    r = await req("POST", catsUrl, { token: adminToken, body: { name: "!!!", nameAr: "x" } });
+    check("a name with no English letter or number → 400", r.status === 400 && r.body?.error === "The name needs at least one English letter or number");
+    r = await req("POST", catsUrl, { token: adminToken, body: { nameAr: "x" } });
+    check("no name → 400", r.status === 400 && r.body?.error === "Name is required");
+    r = await req("POST", catsUrl, { token: adminToken, body: { name: "Toys" } });
+    check("no Arabic name → 400", r.status === 400 && r.body?.error === "Arabic name is required");
+
+    r = await req("PATCH", `${catsUrl}/${babyCatId}`, { token: adminToken, body: { name: "Baby & Kids Care", slug: "changed" } });
+    check("rename → 200, and the slug stays the same", r.status === 200 && r.body?.category?.name === "Baby & Kids Care" && r.body.category.slug === "baby-care");
+    r = await req("PATCH", `${catsUrl}/banana`, { token: adminToken, body: { name: "x" } });
+    check("malformed id → 400", r.status === 400 && r.body?.error === "Invalid category id");
+    r = await req("PATCH", `${catsUrl}/${FAKE_ID}`, { token: adminToken, body: { name: "x" } });
+    check("unknown id → 404", r.status === 404 && r.body?.error === "Category not found");
+    r = await req("PATCH", `${catsUrl}/${babyCatId}`, { token: adminToken, body: { isActive: "no" } });
+    check("isActive must be a real true/false → 400", r.status === 400);
+
+    // Things that already use it, before it's hidden.
+    r = await req("PATCH", `/api/shops/${dashThirdId}`, { token: dashToken, body: { category: babyCatId } });
+    check("(setup) a shop in the new category", r.status === 200);
+    r = await req("POST", "/api/products", { token: dashToken, body: { name: "Baby Wipes", nameAr: "مناديل", category: babyCatId } });
+    const wipesId = r.body?.product?._id;
+    check("(setup) a product in it", r.status === 201);
+
+    r = await req("PATCH", `${catsUrl}/${babyCatId}`, { token: adminToken, body: { isActive: false } });
+    check("hide → 200, isActive false", r.status === 200 && r.body?.category?.isActive === false);
+    r = await req("GET", "/api/categories");
+    check("gone from the public menu", !r.body?.categories?.some((c) => c._id === babyCatId));
+    r = await req("GET", `/api/categories/${babyCatId}`);
+    check("its public page → 404", r.status === 404);
+    r = await req("POST", "/api/products", { token: dashToken, body: { name: "Baby Bottle", nameAr: "رضاعة", category: babyCatId } });
+    check("a NEW product can't pick it → 400", r.status === 400 && r.body?.error === "This category is no longer available");
+    r = await req("POST", "/api/shops", { token: dashToken, body: { name: "Baby Shop", phone: "13", category: babyCatId } });
+    check("...nor a new shop", r.status === 400 && r.body?.error === "This category is no longer available");
+    r = await req("PATCH", `/api/shops/${dashOpenShop._id}`, { token: dashToken, body: { category: babyCatId } });
+    check("...nor an existing shop switching INTO it", r.status === 400);
+    r = await req("PATCH", `/api/shops/${dashThirdId}`, { token: dashToken, body: { category: babyCatId, phone: "14" } });
+    check("a shop already in it can keep it (a form that sends every field still works)", r.status === 200 && r.body?.shop?.phone === "14");
+    r = await req("PATCH", `/api/products/${wipesId}`, { token: dashToken, body: { category: babyCatId, unit: "pack" } });
+    check("...and so can a product already in it", r.status === 200 && r.body?.product?.unit === "pack");
+    r = await req("GET", `/api/products/${wipesId}`);
+    check("products in a hidden category stay visible", r.status === 200);
+
+    r = await req("PATCH", `${catsUrl}/${babyCatId}`, { token: adminToken, body: { isActive: true } });
+    check("show again → 200", r.status === 200 && r.body?.category?.isActive === true);
+    r = await req("GET", "/api/categories");
+    check("...back in the public menu", r.body?.categories?.some((c) => c._id === babyCatId));
+
+    console.log("\nnpm run seed:categories no longer undoes an admin's changes");
+    const runCategorySeed = () =>
+      new Promise((resolve) => {
+        execFile(
+          process.execPath,
+          [path.join(__dirname, "..", "seed", "categories.seed.js")],
+          { env: process.env }, // MONGO_URI = bastah_test, as for the image script
+          (err, stdout) => resolve({ code: err ? err.code : 0, stdout })
+        );
+      });
+    let catSeed = await runCategorySeed();
+    check("the seed runs → exits OK, adds its categories", catSeed.code === 0 && !!(await Category.findOne({ slug: "men" })));
+    const menCat = await Category.findOne({ slug: "men" });
+    await req("PATCH", `${catsUrl}/${menCat._id}`, { token: adminToken, body: { name: "Men's Fashion", isActive: false } });
+    const catCountBefore = await Category.countDocuments();
+    catSeed = await runCategorySeed();
+    const menAfter = await Category.findById(menCat._id);
+    check("running it again keeps the admin's rename and hide", catSeed.code === 0 && menAfter.name === "Men's Fashion" && menAfter.isActive === false);
+    check("...and adds no duplicates", (await Category.countDocuments()) === catCountBefore);
+
+    console.log("\n/api/admin/areas (add, rename, hide)");
+    const areasUrl = "/api/admin/areas";
+
+    r = await req("GET", areasUrl, { token: customerToken });
+    check("a customer → 403", r.status === 403);
+    r = await req("GET", areasUrl, { token: adminToken });
+    check(
+      "every area, each with how many shops deliver there",
+      r.status === 200 &&
+        r.body?.areas?.length === (await Area.countDocuments()) &&
+        r.body.areas.find((a) => a.slug === "khan-younis")?.shopCount === (await Shop.countDocuments({ "deliveryZones.area": khanYounis._id }))
+    );
+
+    r = await req("POST", areasUrl, { token: adminToken, body: { name: "Beach Camp", nameAr: "مخيم الشاطئ" } });
+    const beachId = r.body?.area?._id;
+    check("add → 201 with slug beach-camp", r.status === 201 && r.body?.area?.slug === "beach-camp");
+    r = await req("POST", areasUrl, { token: adminToken, body: { name: "Beach  Camp", nameAr: "x" } });
+    check("the same slug again → 409", r.status === 409 && r.body?.error === "That name is already used by another area");
+    r = await req("GET", "/api/areas");
+    check("...it's in the public area list at once", r.body?.areas?.some((a) => a._id === beachId));
+
+    r = await req("PATCH", `/api/shops/${dashOpenShop._id}/delivery-zones`, {
+      token: dashToken,
+      body: { zones: [{ area: dashArea._id.toString(), fee: 5 }, { area: beachId, fee: 3 }] },
+    });
+    check("(setup) a shop delivers there", r.status === 200 && r.body?.shop?.deliveryZones?.length === 2);
+
+    r = await req("PATCH", `${areasUrl}/${beachId}`, { token: adminToken, body: { name: "Al-Shati Camp", isActive: false } });
+    check("rename + hide → 200, slug unchanged", r.status === 200 && r.body?.area?.name === "Al-Shati Camp" && r.body.area.slug === "beach-camp" && r.body.area.isActive === false);
+    r = await req("GET", "/api/areas");
+    check("gone from the public area list", !r.body?.areas?.some((a) => a._id === beachId));
+
+    r = await req("PATCH", `/api/shops/${dashOpenShop._id}/delivery-zones`, {
+      token: dashToken,
+      body: { zones: [{ area: dashArea._id.toString(), fee: 6 }, { area: beachId, fee: 3 }] },
+    });
+    check("a shop that already delivers there can keep the zone while changing others", r.status === 200 && r.body?.shop?.deliveryZones?.find((z) => z.area?._id === dashArea._id.toString())?.fee === 6);
+    r = await req("PATCH", `/api/shops/${dashThirdId}/delivery-zones`, {
+      token: dashToken,
+      body: { zones: [{ area: beachId, fee: 2 }] },
+    });
+    check("but no shop can ADD it → 400", r.status === 400 && r.body?.error === "Al-Shati Camp is no longer a delivery area");
+    r = await req("PATCH", `/api/shops/${dashThirdId}/delivery-zones`, {
+      token: dashToken,
+      body: { zones: [{ area: FAKE_ID, fee: 2 }] },
+    });
+    check("(an unknown area is still 400 Area not found)", r.status === 400 && r.body?.error === "Area not found");
+
+    await req("DELETE", "/api/cart", { token: customer2Token });
+    await req("POST", "/api/cart/items", { token: customer2Token, body: { listing: riceListing._id.toString() } });
+    r = await req("POST", "/api/orders", {
+      token: customer2Token,
+      body: { contactPhone: "0599", deliveryMethod: "delivery", address: { area: beachId, details: "Near the mosque" } },
+    });
+    check("checkout with delivery to a hidden area → 400, nothing ordered", r.status === 400 && r.body?.error === "Area not found");
+    await req("DELETE", "/api/cart", { token: customer2Token });
+
+    r = await req("PATCH", `${areasUrl}/${beachId}`, { token: adminToken, body: { isActive: true } });
+    check("show again → 200", r.status === 200 && r.body?.area?.isActive === true);
+    r = await req("PATCH", `${areasUrl}/${beachId}`, { token: adminToken, body: { icon: "x" } });
+    check("areas have no icon: it's simply ignored", r.status === 200 && r.body?.area?.icon === undefined);
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.
