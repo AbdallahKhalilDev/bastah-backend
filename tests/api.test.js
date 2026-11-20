@@ -2974,6 +2974,47 @@ async function main() {
     r = await req("GET", "/api/shops/top");
     check("/api/shops/top stays lean (no deliveryZones)", r.body?.shops?.[0]?.deliveryZones === undefined);
 
+    // ============ GET /api/shops?owner= (slice 17.1b) ============
+    // The public "all shops by this seller" page. `seller` owns Shop A, Shop B,
+    // the CLOSED "Hidden Shop", and any shop earlier tests created for them, so
+    // the expected names come from the database instead of a hard-coded list.
+    console.log("\nGET /api/shops?owner= (all shops by one seller)");
+
+    const sellerOpenNames = (await Shop.find({ owner: seller._id, isActive: true }))
+      .map((s) => s.name)
+      .sort();
+    r = await req("GET", `/api/shops?owner=${seller._id}`);
+    const byOwner = r.body?.shops || [];
+    check(
+      "public, no token → exactly that seller's OPEN shops",
+      r.status === 200 && byOwner.map((s) => s.name).sort().join("|") === sellerOpenNames.join("|")
+    );
+    check("...including Shop A and Shop B", byOwner.some((s) => s.name === "Shop A") && byOwner.some((s) => s.name === "Shop B"));
+    check("...but NOT their closed shop", !byOwner.some((s) => s.name === "Hidden Shop"));
+    check("...and no other seller's shop", byOwner.every((s) => s.owner?._id === seller._id.toString()));
+    check(
+      "the owner shows ONLY their id and name (no email, no personal phone)",
+      byOwner.every((s) => Object.keys(s.owner || {}).sort().join(",") === "_id,name" && s.owner.name === "Seller")
+    );
+
+    r = await req("GET", `/api/shops?owner=${otherSeller._id}`);
+    check("the other seller → only their shop", r.status === 200 && r.body?.shops?.length === 1 && r.body.shops[0].name === "Other Shop");
+
+    r = await req("GET", `/api/shops?owner=${customer._id}`);
+    check("a customer's id (owns no shops) → [] and 200", r.status === 200 && r.body?.shops?.length === 0);
+
+    r = await req("GET", `/api/shops?owner=${FAKE_ID}`);
+    check("an id that doesn't exist → [] and 200", r.status === 200 && r.body?.shops?.length === 0);
+
+    r = await req("GET", "/api/shops?owner=abc");
+    check("malformed id → 400 Invalid seller id", r.status === 400 && r.body?.error === "Invalid seller id");
+
+    r = await req("GET", `/api/shops?owner=${seller._id}&deliversTo=${khanYounis.id}`);
+    check("combines with ?deliversTo= → only Shop A", r.status === 200 && r.body?.shops?.length === 1 && r.body.shops[0].name === "Shop A");
+
+    r = await req("GET", `/api/shops?owner=${seller._id}&deliversTo=${nuseirat.id}`);
+    check("...and an area none of theirs covers → []", r.status === 200 && r.body?.shops?.length === 0);
+
     // ============ Delivery at checkout (Step 13, slice 13.2) ============
     console.log("\nPOST /api/orders with deliveryMethod");
     // Zones right now: shopA → Khan Younis ₪3 · shopB → Rimal ₪0

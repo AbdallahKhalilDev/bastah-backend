@@ -41,6 +41,7 @@ const setZonesSchema = z.object({
 
 // GET /api/shops
 // Public. Returns every ACTIVE shop, sorted by name.
+// Optional filters: ?deliversTo=<areaId>, ?owner=<sellerId> (they combine).
 async function listShops(req, res, next) {
   // find({ isActive: true }) hides any shop we've deactivated. When there are no
   // shops yet this simply returns [] — an empty list is a correct, successful
@@ -61,6 +62,23 @@ async function listShops(req, res, next) {
       return next({ status: 400, message: "Invalid area id" });
     }
     filter["deliveryZones.area"] = req.query.deliversTo;
+  }
+
+  // Optional ?owner=<sellerId>: "all shops by this seller", the public seller
+  // page. The frontend takes the id from a shop page (shop.owner._id).
+  //
+  // It's only a filter on the list we already show the public, so it reveals
+  // nothing new: still OPEN shops only (the isActive filter above stays), and
+  // the owner is still populated with their NAME only. The person stays private;
+  // the shop is the public profile.
+  //
+  // An id that owns no open shops (or isn't a seller at all) simply gives [],
+  // the same as ?deliversTo= for an area nobody covers.
+  if (req.query.owner) {
+    if (!mongoose.Types.ObjectId.isValid(req.query.owner)) {
+      return next({ status: 400, message: "Invalid seller id" });
+    }
+    filter.owner = req.query.owner;
   }
 
   // .populate() swaps a stored reference id for the real document it points at:

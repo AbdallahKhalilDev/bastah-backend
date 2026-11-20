@@ -25,7 +25,7 @@ const router = express.Router();
 // asyncHandler forwards any thrown/rejected error to our central errorHandler.
 
 // Public reads (no auth).
-router.get("/", asyncHandler(listShops));
+router.get("/", asyncHandler(listShops)); // ?deliversTo= ?owner=
 // Home: top stores (best-rated active shops). This literal word MUST be
 // registered before "/:id", or Express would treat "top" as a shop id and try to
 // look it up (→ 400 "Invalid shop id"). Same route-order rule as /featured.
