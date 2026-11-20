@@ -3911,6 +3911,148 @@ async function main() {
     r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: { locked: false } });
     check("(cleanup) Dash Open unlocked and open", r.status === 200 && r.body?.shop?.isActive === true);
 
+    // ============ Products: who may edit them (slice 17.6) ============
+    console.log("\nPOST /api/products records who added it (and hides it)");
+    const otherSellerToken = tokenFor(otherSeller);
+
+    r = await req("POST", "/api/products", {
+      token: dashToken,
+      body: { name: "Edit Me Bread", nameAr: "خبز", category: category._id.toString(), unit: "loaf", createdBy: admin._id.toString() },
+    });
+    const breadId = r.body?.product?._id;
+    check("201, and the creator is the caller (a body `createdBy` is ignored)", r.status === 201 && r.body?.product?.createdBy === dashSeller._id.toString());
+
+    r = await req("GET", `/api/products/${breadId}`);
+    check("the public product page doesn't show who created it", r.status === 200 && r.body?.product?.createdBy === undefined);
+    r = await req("GET", "/api/products?limit=50");
+    check("...nor does the product list", r.status === 200 && r.body.products.every((p) => p.createdBy === undefined));
+
+    r = await req("POST", "/api/products", { token: dashToken, body: { name: "   ", nameAr: "خبز", category: category._id.toString() } });
+    check("create now trims: a blank name → 400", r.status === 400 && r.body?.error === "Name is required");
+    r = await req("POST", "/api/products", { token: dashToken, body: { name: "a".repeat(101), nameAr: "خبز", category: category._id.toString() } });
+    check("...and has length limits (name over 100 → 400)", r.status === 400 && r.body?.error === "Name is too long (max 100 characters)");
+
+    console.log("\nPATCH /api/products/:id (the creator, until it's shared; admins always)");
+    const productUrl = (id) => `/api/products/${id}`;
+
+    r = await req("PATCH", productUrl(breadId), { body: { name: "x" } });
+    check("no token → 401", r.status === 401);
+    r = await req("PATCH", productUrl(breadId), { token: customerToken, body: { name: "x" } });
+    check("a customer → 403", r.status === 403);
+    r = await req("PATCH", productUrl("banana"), { token: dashToken, body: { name: "x" } });
+    check("malformed id → 400", r.status === 400 && r.body?.error === "Invalid product id");
+    r = await req("PATCH", productUrl(FAKE_ID), { token: dashToken, body: { name: "x" } });
+    check("unknown product → 404", r.status === 404);
+    r = await req("PATCH", productUrl(breadId), { token: otherSellerToken, body: { name: "Mine now" } });
+    check("a seller who didn't add it → 403", r.status === 403 && r.body?.error === "You can only edit products you added" && r.body?.code === undefined);
+
+    r = await req("PATCH", productUrl(breadId), { token: dashToken, body: { name: "Edit Me Bread (fixed)", unit: "500g" } });
+    check("the creator fixes a typo → 200", r.status === 200 && r.body?.product?.name === "Edit Me Bread (fixed)" && r.body.product.unit === "500g");
+    check("...the reply has the category filled in", r.body?.product?.category?.name === "Grocery");
+
+    r = await req("PATCH", productUrl(breadId), {
+      token: dashToken,
+      body: { imageUrl: "https://evil.example/x.png", isFeatured: true, createdBy: otherSeller._id.toString() },
+    });
+    const breadAfter = await Product.findById(breadId).select("+createdBy");
+    check(
+      "imageUrl, isFeatured and createdBy can't be changed this way",
+      r.status === 200 &&
+        breadAfter.imageUrl === "/images/products/default.jpg" &&
+        breadAfter.isFeatured === false &&
+        breadAfter.createdBy.toString() === dashSeller._id.toString()
+    );
+
+    r = await req("PATCH", productUrl(breadId), { token: dashToken, body: { name: "" } });
+    check("the same rules as create: an empty name → 400", r.status === 400 && r.body?.error === "Name is required");
+    r = await req("PATCH", productUrl(breadId), { token: dashToken, body: { category: "banana" } });
+    check("...a malformed category → 400", r.status === 400 && r.body?.error === "Invalid category id");
+    r = await req("PATCH", productUrl(breadId), { token: dashToken, body: { category: FAKE_ID } });
+    check("...an unknown category → 400", r.status === 400 && r.body?.error === "Category not found");
+
+    // The creator sells it in TWO of their own shops: still theirs alone.
+    await req("POST", `/api/shops/${dashOpenShop._id}/listings`, { token: dashToken, body: { product: breadId, price: 3 } });
+    r = await req("POST", `/api/shops/${dashThirdId}/listings`, { token: dashToken, body: { product: breadId, price: 3 } });
+    check("(setup) listed in two of the creator's own shops", r.status === 201);
+    r = await req("PATCH", productUrl(breadId), { token: dashToken, body: { nameAr: "خبز طازج" } });
+    check("selling it in your OWN second shop doesn't make it shared → 200", r.status === 200 && r.body?.product?.nameAr === "خبز طازج");
+
+    // Another seller starts selling it: now it's shared.
+    r = await req("POST", `/api/shops/${otherShop._id}/listings`, { token: otherSellerToken, body: { product: breadId, price: 2.5 } });
+    const otherBreadListingId = r.body?.listing?._id;
+    check("(setup) another seller lists it too", r.status === 201);
+    r = await req("PATCH", productUrl(breadId), { token: dashToken, body: { name: "Changed for everyone" } });
+    check("now the creator can't edit it → 403 product_shared", r.status === 403 && r.body?.code === "product_shared");
+    r = await req("PATCH", productUrl(breadId), { token: adminToken, body: { name: "Bread (checked by admin)" } });
+    check("...but an admin can → 200", r.status === 200 && r.body?.product?.name === "Bread (checked by admin)");
+
+    // A product made before creators were recorded (no createdBy stored).
+    r = await req("PATCH", productUrl(dashP1._id), { token: dashToken, body: { description: "Long grain" } });
+    check("a product with no recorded creator: a seller → 403", r.status === 403 && r.body?.error === "You can only edit products you added");
+    r = await req("PATCH", productUrl(dashP1._id), { token: adminToken, body: { description: "Long grain" } });
+    check("...an admin → 200", r.status === 200 && r.body?.product?.description === "Long grain");
+
+    console.log("\nGET /api/seller/products (products I added, with canEdit)");
+    r = await req("POST", "/api/products", {
+      token: dashToken,
+      body: { name: "Edit Me Jam", nameAr: "مربى", category: category._id.toString() },
+    });
+    const jamId = r.body?.product?._id;
+
+    r = await req("GET", "/api/seller/products", { token: dashToken });
+    const myProducts = r.body?.products || [];
+    check("200, paginated, only the 2 products I added, newest first", r.status === 200 && r.body?.total === 2 && myProducts.map((p) => p._id).join() === `${jamId},${breadId}`);
+    check("nobody else sells the jam → canEdit true", myProducts[0]?.canEdit === true);
+    check("another seller sells the bread → canEdit false", myProducts[1]?.canEdit === false);
+    check("the category is filled in", myProducts[0]?.category?.name === "Grocery");
+
+    r = await req("GET", "/api/seller/products", { token: tokenFor(shoplessSeller) });
+    check("a seller who added nothing → empty page, 200", r.status === 200 && r.body?.total === 0);
+    r = await req("GET", "/api/seller/products", { token: customerToken });
+    check("a customer → 403", r.status === 403);
+
+    // The other seller stops selling it: it's the creator's alone again.
+    await req("DELETE", `/api/listings/${otherBreadListingId}`, { token: otherSellerToken });
+    r = await req("GET", "/api/seller/products", { token: dashToken });
+    check("when the other seller stops selling it → canEdit true again", r.body?.products?.find((p) => p._id === breadId)?.canEdit === true);
+    r = await req("PATCH", productUrl(breadId), { token: dashToken, body: { name: "Edit Me Bread" } });
+    check("...and the creator can edit it again", r.status === 200);
+
+    // ===== The photo script after a rename (slice 17.6) =====
+    console.log("\nnpm run seed:product-images keeps a renamed product's photo");
+    const runImageSeed = () =>
+      new Promise((resolve) => {
+        execFile(
+          process.execPath,
+          [path.join(__dirname, "..", "seed", "productImages.seed.js")],
+          // process.env points MONGO_URI at bastah_test, and dotenv never
+          // overrides a value that's already set, so the script can't reach Atlas.
+          { env: process.env },
+          (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr })
+        );
+      });
+
+    const ball = await Product.create({ name: "Football", nameAr: "كرة قدم", category: category._id, createdBy: dashSeller._id });
+    const lostPhoto = await Product.create({
+      name: "Lost Photo Thing",
+      nameAr: "صورة",
+      category: category._id,
+      imageUrl: "/images/products/no-such-file.webp",
+    });
+
+    let seedRun = await runImageSeed();
+    check("the script runs → exits OK", seedRun.code === 0);
+    check("a product named like a file gets that photo", (await Product.findById(ball._id)).imageUrl === "/images/products/football.webp");
+    check("a photo whose file is gone → the placeholder", (await Product.findById(lostPhoto._id)).imageUrl === "/images/products/default.jpg");
+
+    r = await req("PATCH", productUrl(ball._id), { token: dashToken, body: { name: "Football (size 5)" } });
+    check("(setup) the creator renames it", r.status === 200 && r.body?.product?.imageUrl === "/images/products/football.webp");
+
+    seedRun = await runImageSeed();
+    check("after the rename, the script KEEPS its photo", seedRun.code === 0 && (await Product.findById(ball._id)).imageUrl === "/images/products/football.webp");
+    check("...says so in its report", seedRun.stdout.includes("Football (size 5) (keeps football.webp)"));
+    check("...and doesn't warn that football.webp matches nothing", !seedRun.stderr.includes("football.webp matches no product"));
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

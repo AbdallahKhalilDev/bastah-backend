@@ -4,8 +4,14 @@
 // whose English name slugifies to the file's name (minus the extension):
 //   "Men's T-Shirt"     -> men-s-t-shirt.webp
 //   "Vitamin C Tablets" -> vitamin-c-tablets.webp
-// A product with NO matching file gets the "no photo yet" placeholder
-// (default.jpg). So after this runs, EVERY product has a working imageUrl.
+// For each product, in this order:
+//   1. a file matching its name wins;
+//   2. otherwise, if it ALREADY has a photo whose file still exists, it keeps
+//      it. That's what happens after a rename (Step 17): "Kids' Toy Car" renamed
+//      to "Toy Car (red)" no longer matches kids-toy-car.webp by name, but it
+//      should obviously keep its photo;
+//   3. otherwise it gets the "no photo yet" placeholder (default.jpg).
+// So after this runs, EVERY product has a working imageUrl.
 //
 // Adding photos later is backend-only: drop the file in the folder, re-run this,
 // commit, push. The frontend never changes, because it just shows whatever
@@ -33,6 +39,15 @@ const {
 // Only real image files count (this skips stray files like .DS_Store).
 const IMAGE_EXTENSIONS = new Set([".webp", ".jpg", ".jpeg", ".png", ".svg"]);
 
+// The photo file a stored imageUrl points at, if it's one of our photo files and
+// it still exists. Otherwise (the placeholder, a deleted file, anything else) null.
+function existingPhotoFile(imageUrl, photoFiles) {
+  const prefix = `${PRODUCT_IMAGES_URL}/`;
+  if (typeof imageUrl !== "string" || !imageUrl.startsWith(prefix)) return null;
+  const file = imageUrl.slice(prefix.length);
+  return photoFiles.has(file) ? file : null;
+}
+
 async function seedProductImages() {
   // 1. Read the folder and index the photos by slug: "football" -> "football.webp".
   //    The placeholder itself is skipped; it isn't any one product's photo.
@@ -49,6 +64,9 @@ async function seedProductImages() {
     fileBySlug.set(name, file);
   }
 
+  // Every usable photo file, for rule 2 ("keep it if its file still exists").
+  const photoFiles = new Set(fileBySlug.values());
+
   await connectDB();
   // .lean() returns the RAW stored documents. Without it, Mongoose fills in the
   // schema default in memory, so a product saved before imageUrl had a default
@@ -58,18 +76,30 @@ async function seedProductImages() {
   // 2. Work out the path each product SHOULD have, and update only those that differ.
   let updated = 0;
   const withPhoto = [];
+  const keptPhoto = [];
   const onDefault = [];
   const matchedSlugs = new Set();
 
   for (const product of products) {
     const slug = slugify(product.name);
     const file = fileBySlug.get(slug);
-    const imageUrl = file ? `${PRODUCT_IMAGES_URL}/${file}` : DEFAULT_PRODUCT_IMAGE;
+    const currentFile = existingPhotoFile(product.imageUrl, photoFiles);
+    let imageUrl;
 
     if (file) {
+      // Rule 1: the file named after the product.
+      imageUrl = `${PRODUCT_IMAGES_URL}/${file}`;
       matchedSlugs.add(slug);
       withPhoto.push(product.name);
+    } else if (currentFile) {
+      // Rule 2: no file by name, but its current photo still exists → keep it.
+      // That file is in use, so it's "matched" too (no typo warning below).
+      imageUrl = product.imageUrl;
+      matchedSlugs.add(path.parse(currentFile).name);
+      keptPhoto.push(`${product.name} (keeps ${currentFile})`);
     } else {
+      // Rule 3: the placeholder.
+      imageUrl = DEFAULT_PRODUCT_IMAGE;
       onDefault.push(product.name);
     }
 
@@ -85,9 +115,13 @@ async function seedProductImages() {
     console.warn(`! ${file} matches no product (looked for a product named like "${slug}"). Check the spelling.`);
   }
 
-  console.log(`\n${products.length} products: ${withPhoto.length} with their own photo, ${onDefault.length} on the placeholder.`);
+  console.log(
+    `\n${products.length} products: ${withPhoto.length} with their own photo, ` +
+      `${keptPhoto.length} kept their photo after a rename, ${onDefault.length} on the placeholder.`
+  );
   console.log(`Updated ${updated} product(s) this run.`);
   if (withPhoto.length) console.log(`\nWith a photo:\n  ${withPhoto.join("\n  ")}`);
+  if (keptPhoto.length) console.log(`\nKept their photo (renamed since it was linked):\n  ${keptPhoto.join("\n  ")}`);
   if (onDefault.length) console.log(`\nStill on the placeholder (add a file to give them a photo):\n  ${onDefault.join("\n  ")}`);
 
   await mongoose.disconnect();

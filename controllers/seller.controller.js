@@ -13,8 +13,11 @@ const mongoose = require("mongoose");
 const { z } = require("zod");
 const Shop = require("../models/Shop");
 const Listing = require("../models/Listing");
+const Product = require("../models/Product");
+const parsePagination = require("../utils/pagination");
 const { ZONE_POPULATE } = require("../utils/shopRules");
 const { shopFilter } = require("../utils/sellerQueries");
+const { sharedProductIds } = require("../utils/productRules");
 const { getOrderStats, getListingStats } = require("../utils/statsQueries");
 
 // The whitelist for "these prices are still right". Exactly ONE of the two
@@ -133,4 +136,49 @@ async function getMyStats(req, res, next) {
   res.json({ ...orderStats, listings });
 }
 
-module.exports = { listMyShops, confirmPrices, getMyStats };
+// GET /api/seller/products
+// The catalog products I ADDED, newest first, paginated, each with `canEdit`:
+//   true  → nobody else sells it yet, so I may still fix it
+//           (PATCH /api/products/:id);
+//   false → another seller's shop lists it now, so only an admin can change it.
+// The dashboard uses canEdit to show or grey out the edit button, instead of
+// letting the seller try and get a 403 product_shared.
+//
+// (Products I merely SELL, added by someone else, are my items:
+// GET /api/seller/listings.)
+async function listMyProducts(req, res) {
+  const { page, limit, skip } = parsePagination(req.query);
+
+  // createdBy is hidden from results (select: false), but a filter can still
+  // use it.
+  const filter = { createdBy: req.user.id };
+
+  const [products, total] = await Promise.all([
+    Product.find(filter)
+      .sort({ createdAt: -1, _id: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("category", "name nameAr"),
+    Product.countDocuments(filter),
+  ]);
+
+  // One query for the whole page: which of these does another seller list?
+  const shared = await sharedProductIds(
+    products.map((p) => p._id),
+    req.user.id
+  );
+
+  res.json({
+    // toObject() turns each Mongoose document into a plain object, so we can
+    // add a field that isn't part of the schema.
+    products: products.map((p) => ({
+      ...p.toObject(),
+      canEdit: !shared.has(p._id.toString()),
+    })),
+    page,
+    limit,
+    total,
+  });
+}
+
+module.exports = { listMyShops, confirmPrices, getMyStats, listMyProducts };

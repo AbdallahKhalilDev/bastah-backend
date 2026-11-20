@@ -69,6 +69,25 @@ const productSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Who added this product to the catalog (set by POST /api/products from the
+    // token, never from the body). It decides who may EDIT it: the seller who
+    // created it, until another seller's shop sells it too (see
+    // utils/productRules.js). Admins can always edit.
+    //
+    // Products made before this field existed have nothing stored. The default
+    // null means "creator unknown", so only an admin can edit those.
+    //
+    // NEW CONCEPT: `select: false`. Mongoose leaves this field OUT of every
+    // query's result unless a query asks for it by name with
+    // .select("+createdBy"). So the many public product reads (browse, search,
+    // home, product page…) never reveal who created what, without changing any
+    // of them. It's the schema-level version of .select("-passwordHash").
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      select: false,
+    },
   },
   {
     // Mongoose auto-adds and maintains `createdAt` and `updatedAt` timestamps.

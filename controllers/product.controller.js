@@ -1,28 +1,25 @@
 const mongoose = require("mongoose");
 const { z } = require("zod");
 const Product = require("../models/Product");
-const Category = require("../models/Category");
 const parsePagination = require("../utils/pagination");
 const homeQueries = require("../utils/homeQueries");
 const escapeRegex = require("../utils/escapeRegex");
+const { checkCategory } = require("../utils/shopRules");
 
 // --- Input validation ---------------------------------------------------
-// zod describes exactly what a valid "create product" body looks like. It is a
-// WHITELIST: only these keys are accepted. By default zod *strips* any other key
-// it doesn't know about, so if a client sneaks in something unexpected it's
-// silently dropped and can never reach the database. name/nameAr/category are
-// the required ones; description/unit are optional extras.
-// imageUrl is deliberately NOT here: product images are files we manage on the
-// server, so a new product gets the placeholder (the schema default) and
+// The product field rules live in utils/productRules.js, shared by create and
+// edit, so a product can't be valid in one and invalid in the other. They are
+// WHITELISTS: zod drops any key it doesn't know, so a client can't set things
+// it shouldn't.
+// imageUrl is deliberately NOT in them: product images are files we manage on
+// the server, so a new product gets the placeholder (the schema default) and
 // `npm run seed:product-images` links its real photo later. If a client sends
 // imageUrl anyway, zod strips it like any other unknown key.
-const createProductSchema = z.object({
-  name: z.string().min(1, "Name is required"),
-  nameAr: z.string().min(1, "Arabic name is required"),
-  description: z.string().optional(),
-  category: z.string().min(1, "Category is required"),
-  unit: z.string().optional(),
-});
+const {
+  createProductSchema,
+  updateProductSchema,
+  checkCanEditProduct,
+} = require("../utils/productRules");
 
 // The body for the admin-only "feature / un-feature" route. It's a single
 // required boolean: `true` promotes the product to the Home page, `false` removes
@@ -48,22 +45,19 @@ async function createProduct(req, res, next) {
   }
   const data = result.data;
 
-  // 2. category is REQUIRED for a product, and it must point at a real Category.
-  //    First check the id is well-formed (else Mongoose would throw a CastError),
-  //    then that a Category with that id actually exists. Because category here
-  //    arrives in the request BODY (data the caller supplied), a bad or missing
-  //    one is the caller's mistake → 400, the same way createShop treats it.
-  if (!mongoose.Types.ObjectId.isValid(data.category)) {
-    return next({ status: 400, message: "Invalid category id" });
-  }
-  const category = await Category.findById(data.category);
-  if (!category) {
-    return next({ status: 400, message: "Category not found" });
+  // 2. category must point at a real Category: a well-formed id (else Mongoose
+  //    would throw a CastError) of one that exists. It arrives in the request
+  //    BODY, so a bad one is the caller's mistake → 400. The same shared check
+  //    the shops use.
+  const categoryProblem = await checkCategory(data.category);
+  if (categoryProblem) {
+    return next({ status: 400, message: categoryProblem });
   }
 
   // 3. Create the product. Only whitelisted keys are in `data`, so nothing
-  //    unexpected can slip into the document.
-  const product = await Product.create(data);
+  //    unexpected can slip into the document. The creator comes from the
+  //    verified token, never from the body: it decides who may edit it later.
+  const product = await Product.create({ ...data, createdBy: req.user.id });
 
   // 4. Populate the category before replying, so the response shows the full
   //    category document (name, nameAr…) instead of just its id — handy when
@@ -224,6 +218,54 @@ async function setFeatured(req, res, next) {
   res.json({ product });
 }
 
+// PATCH /api/products/:id
+// Protected: a logged-in seller or admin (auth + requireRole run first). Edits a
+// catalog product's name, Arabic name, description, category or unit.
+//
+// WHO may edit is the rule in utils/productRules.js: an admin always; the
+// seller who created it, only while no other seller's shop sells it.
+//   not the creator               → 403
+//   the creator, but it's shared  → 403 with code "product_shared", so the
+//                                   dashboard can say "ask an admin"
+// Same order as editing a shop: find it, check it's yours, then read the body.
+async function updateProduct(req, res, next) {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next({ status: 400, message: "Invalid product id" });
+  }
+
+  // "+createdBy" asks for the field the schema hides from every other read
+  // (select: false). The permission check needs it.
+  const product = await Product.findById(req.params.id).select("+createdBy");
+  if (!product) {
+    return next({ status: 404, message: "Product not found" });
+  }
+
+  const notAllowed = await checkCanEditProduct(product, req.user);
+  if (notAllowed) {
+    return next(notAllowed);
+  }
+
+  const result = updateProductSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const data = result.data;
+
+  // Only when a new category is sent (checkCategory passes on undefined).
+  const categoryProblem = await checkCategory(data.category);
+  if (categoryProblem) {
+    return next({ status: 400, message: categoryProblem });
+  }
+
+  // Only whitelisted keys are in `data`. Old orders are NOT affected by a
+  // rename: each order line froze the product's name at checkout.
+  Object.assign(product, data);
+  await product.save();
+  await product.populate("category", "name nameAr");
+  res.json({ product });
+}
+
 module.exports = {
   createProduct,
   listProducts,
@@ -232,4 +274,5 @@ module.exports = {
   getFeaturedProducts,
   getNewArrivals,
   setFeatured,
+  updateProduct,
 };

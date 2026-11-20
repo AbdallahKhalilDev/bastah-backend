@@ -10,6 +10,7 @@ const {
   getFeaturedProducts,
   getNewArrivals,
   setFeatured,
+  updateProduct,
 } = require("../controllers/product.controller");
 const { listProductListings } = require("../controllers/listing.controller");
 
@@ -46,6 +47,18 @@ router.post(
   auth,
   requireRole("seller", "admin"),
   asyncHandler(createProduct)
+);
+
+// Edit a product (name, nameAr, description, category, unit). Same gate as
+// create. WHICH seller may edit WHICH product (the creator, until another
+// seller's shop sells it) is decided inside the controller, because it needs to
+// load the product first, just like the ownership check on PATCH /api/shops/:id.
+// One segment + PATCH, so it never collides with GET /:id or PATCH /:id/feature.
+router.patch(
+  "/:id",
+  auth,
+  requireRole("seller", "admin"),
+  asyncHandler(updateProduct)
 );
 
 // Feature / un-feature a product. ADMIN ONLY — featuring is an editorial decision

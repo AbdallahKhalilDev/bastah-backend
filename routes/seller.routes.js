@@ -6,6 +6,7 @@ const {
   listMyShops,
   confirmPrices,
   getMyStats,
+  listMyProducts,
 } = require("../controllers/seller.controller");
 // The item list is shared with the admin dashboard (GET /api/admin/listings).
 const { listDashboardListings } = require("../controllers/listing.controller");
@@ -24,5 +25,6 @@ router.get("/shops", asyncHandler(listMyShops)); // all my shops, closed ones to
 router.get("/listings", asyncHandler(listDashboardListings)); // my items, paginated; ?staleDays= for old prices
 router.post("/listings/confirm", asyncHandler(confirmPrices)); // "these prices are still right"
 router.get("/stats", asyncHandler(getMyStats)); // the number cards; ?shop= for one shop
+router.get("/products", asyncHandler(listMyProducts)); // products I added, each with canEdit
 
 module.exports = router;
