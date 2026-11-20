@@ -4,10 +4,11 @@ const auth = require("../middleware/auth");
 const requireRole = require("../middleware/requireRole");
 const {
   listMyShops,
-  listMyListings,
   confirmPrices,
   getMyStats,
 } = require("../controllers/seller.controller");
+// The item list is shared with the admin dashboard (GET /api/admin/listings).
+const { listDashboardListings } = require("../controllers/listing.controller");
 
 const router = express.Router();
 
@@ -20,7 +21,7 @@ const router = express.Router();
 router.use(auth, requireRole("seller"));
 
 router.get("/shops", asyncHandler(listMyShops)); // all my shops, closed ones too
-router.get("/listings", asyncHandler(listMyListings)); // my items, paginated; ?staleDays= for old prices
+router.get("/listings", asyncHandler(listDashboardListings)); // my items, paginated; ?staleDays= for old prices
 router.post("/listings/confirm", asyncHandler(confirmPrices)); // "these prices are still right"
 router.get("/stats", asyncHandler(getMyStats)); // the number cards; ?shop= for one shop
 

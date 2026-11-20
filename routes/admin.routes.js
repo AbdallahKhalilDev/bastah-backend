@@ -11,7 +11,12 @@ const {
   setUserStatus,
   createUserShop,
 } = require("../controllers/admin.controller");
-const { listAllShops, setShopVerified } = require("../controllers/adminShop.controller");
+const {
+  listAllShops,
+  setShopVerified,
+  setShopLock,
+} = require("../controllers/adminShop.controller");
+const { listDashboardListings } = require("../controllers/listing.controller");
 
 const router = express.Router();
 
@@ -40,5 +45,10 @@ router.post("/users/:id/shops", asyncHandler(createUserShop)); // a shop FOR thi
 // Shops (slice 17.4). Editing a shop's details is the existing PATCH /api/shops/:id.
 router.get("/shops", asyncHandler(listAllShops)); // every shop, closed ones too
 router.patch("/shops/:id/verify", asyncHandler(setShopVerified)); // the "verified" badge
+router.patch("/shops/:id/lock", asyncHandler(setShopLock)); // close a shop so its seller can't re-open it
+
+// Items of any shop, open, closed or locked (?shop=, ?inStock=, ?staleDays=).
+// The same function as the seller's GET /api/seller/listings.
+router.get("/listings", asyncHandler(listDashboardListings));
 
 module.exports = router;

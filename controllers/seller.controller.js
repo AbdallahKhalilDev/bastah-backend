@@ -1,4 +1,6 @@
-// The seller dashboard's READS: "my shops" and "my items".
+// The seller dashboard: "my shops", "these prices are still right" and the
+// number cards. ("My items", GET /api/seller/listings, is shared with the admin
+// dashboard, so it lives in listing.controller.js as listDashboardListings.)
 //
 // Every route here is seller-only. The check happens ONCE, at the top of
 // routes/seller.routes.js (router.use), exactly like /api/admin.
@@ -11,15 +13,8 @@ const mongoose = require("mongoose");
 const { z } = require("zod");
 const Shop = require("../models/Shop");
 const Listing = require("../models/Listing");
-const parsePagination = require("../utils/pagination");
-const parseBooleanQuery = require("../utils/booleanQuery");
 const { ZONE_POPULATE } = require("../utils/shopRules");
-const {
-  shopFilter,
-  staleFilter,
-  MIN_STALE_DAYS,
-  MAX_STALE_DAYS,
-} = require("../utils/sellerQueries");
+const { shopFilter } = require("../utils/sellerQueries");
 const { getOrderStats, getListingStats } = require("../utils/statsQueries");
 
 // The whitelist for "these prices are still right". Exactly ONE of the two
@@ -51,6 +46,10 @@ const confirmSchema = z.object({
 // so nobody can ask for another seller's shops.
 async function listMyShops(req, res) {
   const shops = await Shop.find({ owner: req.user.id })
+    // A shop an admin locked carries `lock` (reason, date), so the dashboard can
+    // explain why it's closed and why "open" is greyed out. Which admin did it
+    // is internal, so that one field is left out ("-" = everything except).
+    .select("-lock.lockedBy")
     // _id breaks ties: two shops created in the same millisecond still come
     // back in one fixed order.
     .sort({ createdAt: 1, _id: 1 })
@@ -58,72 +57,6 @@ async function listMyShops(req, res) {
     .populate(ZONE_POPULATE);
 
   res.json({ shops });
-}
-
-// GET /api/seller/listings
-// My items (listings) across ALL my shops, newest first, paginated.
-// Includes the items of CLOSED shops: the public item list
-// (GET /api/shops/:shopId/products) answers 404 for those.
-//
-// Optional filters (they combine):
-//   ?shop=<id>             one of my shops only (someone else's → 403)
-//   ?inStock=true|false    only items in stock / out of stock
-//   ?staleDays=<1..60>     only OLD prices: not confirmed in that many days, or
-//                          never. Sorted OLDEST first (never-confirmed at the top),
-//                          so the most out-of-date prices are seen first.
-async function listMyListings(req, res, next) {
-  const { page, limit, skip } = parsePagination(req.query);
-
-  // { shop: { $in: myShopIds } }, or { shop: id } for ?shop=.
-  const { problem, filter } = await shopFilter(req.user, req.query.shop);
-  if (problem) {
-    return next(problem);
-  }
-
-  // ?inStock=true|false. The text "false" must become the boolean false, and a
-  // typo is a 400 (see utils/booleanQuery.js).
-  const inStock = parseBooleanQuery(req.query.inStock, "inStock");
-  if (inStock.problem) {
-    return next(inStock.problem);
-  }
-  if (inStock.value !== undefined) {
-    filter.inStock = inStock.value;
-  }
-
-  // Newest first by default. For the old-prices view: oldest confirmation first.
-  let sort = { createdAt: -1, _id: -1 };
-
-  if (req.query.staleDays) {
-    // Number("2.5") is 2.5 and Number("abc") is NaN, and isInteger rejects both.
-    // (parseInt would quietly turn "2.5" into 2.)
-    const days = Number(req.query.staleDays);
-    if (!Number.isInteger(days) || days < MIN_STALE_DAYS || days > MAX_STALE_DAYS) {
-      return next({
-        status: 400,
-        message: `staleDays must be a whole number from ${MIN_STALE_DAYS} to ${MAX_STALE_DAYS}`,
-      });
-    }
-    // Adds the { $or: [...] } condition next to `shop` and `inStock`. MongoDB
-    // treats every key of a filter as AND: mine, AND in stock, AND old.
-    Object.assign(filter, staleFilter(days));
-    // In an ascending sort MongoDB puts null (never confirmed) before any date,
-    // which is exactly the order we want.
-    sort = { priceConfirmedAt: 1, _id: 1 };
-  }
-
-  const [listings, total] = await Promise.all([
-    Listing.find(filter)
-      .sort(sort)
-      .skip(skip)
-      .limit(limit)
-      .populate("product", "name nameAr imageUrl unit category")
-      // The shop's name so a multi-shop seller can tell items apart, and
-      // isActive so the dashboard can mark items of a closed shop.
-      .populate("shop", "name isActive"),
-    Listing.countDocuments(filter),
-  ]);
-
-  res.json({ listings, page, limit, total });
 }
 
 // POST /api/seller/listings/confirm
@@ -200,4 +133,4 @@ async function getMyStats(req, res, next) {
   res.json({ ...orderStats, listings });
 }
 
-module.exports = { listMyShops, listMyListings, confirmPrices, getMyStats };
+module.exports = { listMyShops, confirmPrices, getMyStats };

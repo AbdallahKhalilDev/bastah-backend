@@ -6,6 +6,7 @@ const Shop = require("../models/Shop");
 const parsePagination = require("../utils/pagination");
 const escapeRegex = require("../utils/escapeRegex");
 const { signupShopSchema, createShopFor } = require("../utils/shopRules");
+const { lockSellerShops, unlockSellerShops } = require("../utils/shopLocks");
 const {
   ROLES,
   STATUSES,
@@ -150,7 +151,7 @@ async function getUser(req, res, next) {
   const shops =
     user.role === "seller"
       ? await Shop.find({ owner: user._id })
-          .select("name area phone isActive isVerified createdAt")
+          .select("name area phone isActive isVerified lock createdAt")
           .sort({ createdAt: 1 })
       : [];
 
@@ -307,9 +308,25 @@ async function setUserStatus(req, res, next) {
   await user.save();
 
   // From the very next request, `auth` refuses this account (it reads the
-  // status every time). Its shops stay as they are; an admin can hide them
-  // with PATCH /api/shops/:id { isActive: false } if needed.
-  res.json({ user: adminUser(user) });
+  // status every time).
+  //
+  // A suspended SELLER can't log in to answer orders, so their shops must stop
+  // taking them: suspending locks every shop of theirs, and switching them back
+  // on unlocks only the shops the suspension locked (a shop an admin locked by
+  // hand stays locked). The rules are in utils/shopLocks.js.
+  // Both counts are always in the reply (0 for customers and admins), so the
+  // screen can say "3 shops were closed too".
+  let shopsLocked = 0;
+  let shopsUnlocked = 0;
+  if (user.role === "seller") {
+    if (status === "suspended") {
+      shopsLocked = await lockSellerShops(user._id, req.user.id);
+    } else {
+      shopsUnlocked = await unlockSellerShops(user._id);
+    }
+  }
+
+  res.json({ user: adminUser(user), shopsLocked, shopsUnlocked });
 }
 
 // POST /api/admin/users/:id/shops

@@ -189,7 +189,26 @@ async function updateShop(req, res, next) {
     return next({ status: 400, message: categoryProblem });
   }
 
-  // 6. Copy the validated fields onto the loaded document, then save. save()
+  // 6. A LOCKED shop (closed by an admin) can't be opened through here, by
+  //    anyone. Its other details (name, phone…) can still be edited, and
+  //    sending isActive: false is harmless (it's closed already).
+  //    - a seller → 403 with code "shop_locked", so the dashboard can show the
+  //      admin's reason instead of a plain "forbidden";
+  //    - an admin → 409: an admin MAY open it, but through the unlock button
+  //      (PATCH /api/admin/shops/:id/lock), so there's one way in and one way
+  //      out, and the lock record can never be left behind on an open shop.
+  if (shop.lock && data.isActive === true) {
+    if (req.user.role === "admin") {
+      return next({ status: 409, message: "This shop is locked. Unlock it first" });
+    }
+    return next({
+      status: 403,
+      code: "shop_locked",
+      message: `This shop was closed by an admin: ${shop.lock.reason}`,
+    });
+  }
+
+  // 7. Copy the validated fields onto the loaded document, then save. save()
   //    runs the schema's validators and updates the `updatedAt` timestamp.
   //    Because `data` only ever contains whitelisted keys, there's no way for a
   //    forbidden field to slip in here.

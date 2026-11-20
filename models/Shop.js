@@ -32,6 +32,43 @@ const deliveryZoneSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// A shop an ADMIN has closed ("locked"), so its seller can't simply open it
+// again. Stored as one small sub-document, `lock`, which is null when the shop
+// isn't locked. All the rules live in utils/shopLocks.js.
+const shopLockSchema = new mongoose.Schema(
+  {
+    // Why. The seller sees it on their dashboard.
+    reason: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    // When, and which admin.
+    lockedAt: {
+      type: Date,
+      required: true,
+    },
+    lockedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    // true = locked automatically because the OWNER was suspended. Switching the
+    // owner back on unlocks ONLY these, never a shop an admin locked by hand.
+    viaSuspension: {
+      type: Boolean,
+      default: false,
+    },
+    // Was the shop open when it was locked? Unlocking puts it back the way it
+    // was, so a shop the seller had closed themselves stays closed.
+    wasActive: {
+      type: Boolean,
+      required: true,
+    },
+  },
+  { _id: false }
+);
+
 // A "schema" is the shape/blueprint of a document in a MongoDB collection.
 // This one describes a Shop — a local store that a seller runs on the
 // marketplace. Customers browse shops, and each shop will later hold "listings"
@@ -110,6 +147,13 @@ const shopSchema = new mongoose.Schema(
     isVerified: {
       type: Boolean,
       default: false,
+    },
+    // null = not locked. A locked shop is always closed too (isActive false),
+    // so every place that hides closed shops from customers hides it as well,
+    // with no change to any of them. See utils/shopLocks.js.
+    lock: {
+      type: shopLockSchema,
+      default: null,
     },
 
     // --- Denormalized rating fields -------------------------------------

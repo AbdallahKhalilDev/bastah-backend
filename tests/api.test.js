@@ -3747,6 +3747,170 @@ async function main() {
     r = await req("GET", `/api/shops/${dashOpenShop._id}`);
     check("...and the badge is gone from the shop page", r.body?.shop?.isVerified === false);
 
+    // ============ Admin: locking shops (slice 17.5) ============
+    // dashSeller's 4 shops right now: Dash Open (open), Dash Closed (closed by
+    // the seller), Dash Third (open), Admin Made (open).
+    console.log("\nPATCH /api/admin/shops/:id/lock (close a shop so its seller can't re-open it)");
+    const lockUrl = (id) => `/api/admin/shops/${id}/lock`;
+    const lockBody = { locked: true, reason: "Prices don't match the shelf" };
+
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: dashToken, body: lockBody });
+    check("a seller → 403", r.status === 403);
+    r = await req("PATCH", lockUrl("banana"), { token: adminToken, body: lockBody });
+    check("malformed shop id → 400", r.status === 400 && r.body?.error === "Invalid shop id");
+    r = await req("PATCH", lockUrl(FAKE_ID), { token: adminToken, body: lockBody });
+    check("unknown shop → 404", r.status === 404);
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: {} });
+    check("no `locked` → 400", r.status === 400 && r.body?.error === "locked must be true or false");
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: { locked: true } });
+    check("locking without a reason → 400", r.status === 400 && r.body?.error === "A reason is required to lock a shop");
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: { locked: true, reason: "   " } });
+    check("...a blank reason counts as none → 400", r.status === 400 && r.body?.error === "A reason is required to lock a shop");
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: { locked: true, reason: "a".repeat(501) } });
+    check("a reason over 500 characters → 400", r.status === 400);
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: { locked: false } });
+    check("unlocking a shop that isn't locked → 409", r.status === 409 && r.body?.error === "Shop is not locked");
+
+    // A customer puts a Dash Open item in their cart BEFORE the lock.
+    await req("DELETE", "/api/cart", { token: customer2Token });
+    r = await req("POST", "/api/cart/items", { token: customer2Token, body: { listing: riceListing._id.toString() } });
+    check("(setup) a customer has a Dash Open item in their cart", r.status < 300);
+
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: lockBody });
+    let lockedShop = r.body?.shop;
+    check("lock → 200, and the shop is closed", r.status === 200 && lockedShop?.isActive === false);
+    check(
+      "...the lock records the reason, that it was open, and that it was done by hand",
+      lockedShop?.lock?.reason === lockBody.reason && lockedShop.lock.wasActive === true && lockedShop.lock.viaSuspension === false
+    );
+    check("...and which admin did it (by name, for the admin screen)", lockedShop?.lock?.lockedBy?.name === "Admin");
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: lockBody });
+    check("locking it again → 409", r.status === 409 && r.body?.error === "Shop is already locked");
+
+    console.log("\nA locked shop disappears for customers");
+    r = await req("GET", `/api/shops/${dashOpenShop._id}`);
+    check("its shop page → 404", r.status === 404);
+    r = await req("GET", "/api/shops");
+    check("it's not in the shop list", r.status === 200 && !r.body.shops.some((s) => s.name === "Dash Open"));
+    check("...and no public shop carries lock details", r.body.shops.every((s) => !s.lock));
+    r = await req("GET", `/api/shops/${dashOpenShop._id}/products`);
+    check("its items → 404", r.status === 404);
+    r = await req("GET", `/api/products/${dashP1._id}/listings`);
+    check("its price is gone from the comparison", r.status === 200 && !r.body.listings.some((l) => l.shop?.name === "Dash Open"));
+    r = await req("GET", "/api/search?q=Dash%20Open&type=shops");
+    check("search doesn't find it", r.status === 200 && r.body?.total === 0);
+    r = await req("POST", "/api/orders", { token: customer2Token, body: { contactPhone: "0599" } });
+    check(
+      "checking out a cart with its item → 409, nothing ordered",
+      r.status === 409 && r.body?.error === "Dash Open is not accepting orders right now"
+    );
+
+    console.log("\nThe seller of a locked shop");
+    r = await req("GET", "/api/seller/shops", { token: dashToken });
+    const sellerViewOfLocked = r.body?.shops?.find((s) => s.name === "Dash Open");
+    check("still sees it in their dashboard, with the reason and date", sellerViewOfLocked?.lock?.reason === lockBody.reason && !!sellerViewOfLocked.lock.lockedAt);
+    check("...but not which admin locked it", sellerViewOfLocked?.lock && sellerViewOfLocked.lock.lockedBy === undefined);
+
+    r = await req("PATCH", `/api/shops/${dashOpenShop._id}`, { token: dashToken, body: { isActive: true } });
+    check(
+      "can't re-open it → 403 with code shop_locked and the reason",
+      r.status === 403 && r.body?.code === "shop_locked" && r.body?.error?.includes(lockBody.reason)
+    );
+    r = await req("PATCH", `/api/shops/${dashOpenShop._id}`, { token: dashToken, body: { phone: "0599111222" } });
+    check("...but can still edit its other details", r.status === 200 && r.body?.shop?.phone === "0599111222" && r.body?.shop?.isActive === false);
+    r = await req("PATCH", `/api/shops/${dashOpenShop._id}`, { token: dashToken, body: { isActive: false } });
+    check("...and sending isActive: false is harmless", r.status === 200 && r.body?.shop?.isActive === false);
+    r = await req("GET", `/api/seller/listings?shop=${dashOpenShop._id}`, { token: dashToken });
+    check("...and still sees its items", r.status === 200 && r.body?.total === 3);
+
+    r = await req("PATCH", `/api/shops/${dashOpenShop._id}`, { token: adminToken, body: { isActive: true } });
+    check("an admin can't open it through PATCH /api/shops/:id either → 409", r.status === 409 && r.body?.error === "This shop is locked. Unlock it first");
+
+    console.log("\nGET /api/admin/listings (items of any shop) + locked filters");
+    r = await req("GET", `/api/admin/listings?shop=${dashOpenShop._id}`, { token: adminToken });
+    check("an admin sees a LOCKED shop's items (the public page says 404)", r.status === 200 && r.body?.total === 3);
+    r = await req("GET", `/api/admin/listings?shop=${dashClosedShop._id}`, { token: adminToken });
+    check("...and a CLOSED shop's items", r.status === 200 && r.body?.total === 1 && r.body.listings[0]?.product?.name === "Dash Tea");
+    r = await req("GET", "/api/admin/listings", { token: adminToken });
+    check("without ?shop: every item in the marketplace", r.status === 200 && r.body?.total === (await Listing.countDocuments()));
+    r = await req("GET", `/api/admin/listings?shop=${dashOpenShop._id}&inStock=true&staleDays=1`, { token: adminToken });
+    check("the same filters as the seller's list work", r.status === 200 && typeof r.body?.total === "number");
+    r = await req("GET", "/api/admin/listings?shop=banana", { token: adminToken });
+    check("malformed ?shop → 400", r.status === 400 && r.body?.error === "Invalid shop id");
+    r = await req("GET", "/api/admin/listings", { token: dashToken });
+    check("a seller → 403", r.status === 403);
+
+    r = await req("GET", "/api/admin/shops?locked=true", { token: adminToken });
+    check("GET /api/admin/shops?locked=true → just the locked one", r.body?.total === 1 && r.body.shops[0]?.name === "Dash Open");
+    r = await req("GET", "/api/admin/shops?locked=false", { token: adminToken });
+    check("?locked=false → all the others", r.body?.total === (await Shop.countDocuments()) - 1);
+    r = await req("GET", "/api/admin/shops?locked=yes", { token: adminToken });
+    check("?locked=yes → 400", r.status === 400 && r.body?.error === "locked must be true or false");
+    r = await req("GET", `/api/admin/users/${dashSeller._id}`, { token: adminToken });
+    check("the admin's user details show the lock on that seller's shop", r.body?.shops?.find((s) => s.name === "Dash Open")?.lock?.reason === lockBody.reason);
+
+    console.log("\nUnlocking puts a shop back the way it was");
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: { locked: false } });
+    check("unlock an OPEN-before-lock shop → 200, open again, no lock", r.status === 200 && r.body?.shop?.isActive === true && r.body.shop.lock === null);
+    r = await req("GET", `/api/shops/${dashOpenShop._id}`);
+    check("...customers see it again", r.status === 200);
+    await req("DELETE", "/api/cart", { token: customer2Token });
+
+    await req("PATCH", lockUrl(dashClosedShop._id), { token: adminToken, body: { locked: true, reason: "Checking" } });
+    r = await req("PATCH", lockUrl(dashClosedShop._id), { token: adminToken, body: { locked: false } });
+    check("unlock a shop the SELLER had closed → it stays closed", r.status === 200 && r.body?.shop?.isActive === false && r.body.shop.lock === null);
+
+    console.log("\nSuspending a seller locks their shops");
+    const statusUrl = (id) => `/api/admin/users/${id}/status`;
+    const dashShopsNow = async () => {
+      const all = await Shop.find({ owner: dashSeller._id });
+      return Object.fromEntries(all.map((s) => [s.name, s]));
+    };
+
+    // Lock Dash Open BY HAND first, to show suspension leaves that lock alone.
+    await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: { locked: true, reason: "Locked by hand" } });
+
+    r = await req("PATCH", statusUrl(dashSeller._id), { token: adminToken, body: { status: "suspended", reason: "Unpaid fees" } });
+    check("suspend the seller → 200, 3 shops locked (the 4th was locked already)", r.status === 200 && r.body?.shopsLocked === 3 && r.body?.shopsUnlocked === 0);
+    let dashShops = await dashShopsNow();
+    check("every one of their shops is closed now", Object.values(dashShops).every((s) => s.isActive === false));
+    check(
+      "the three carry a suspension lock with the fixed reason (not the admin's private one)",
+      ["Dash Closed", "Dash Third", "Admin Made"].every(
+        (n) => dashShops[n].lock?.viaSuspension === true && dashShops[n].lock.reason === "The owner's account is suspended"
+      )
+    );
+    check("the hand-made lock is untouched", dashShops["Dash Open"].lock?.viaSuspension === false && dashShops["Dash Open"].lock.reason === "Locked by hand");
+    check("each remembers whether it was open", dashShops["Dash Third"].lock.wasActive === true && dashShops["Dash Closed"].lock.wasActive === false);
+    r = await req("GET", `/api/shops?owner=${dashSeller._id}`);
+    check("customers see none of their shops", r.status === 200 && r.body?.shops?.length === 0);
+
+    r = await req("PATCH", statusUrl(dashSeller._id), { token: adminToken, body: { status: "active" } });
+    check("switch the seller back on → 3 shops unlocked", r.status === 200 && r.body?.shopsUnlocked === 3 && r.body?.shopsLocked === 0);
+    dashShops = await dashShopsNow();
+    check("the open ones are open again", dashShops["Dash Third"].isActive === true && dashShops["Admin Made"].isActive === true && !dashShops["Dash Third"].lock);
+    check("the one they had closed is still closed", dashShops["Dash Closed"].isActive === false && !dashShops["Dash Closed"].lock);
+    check("the hand-locked shop is STILL locked", dashShops["Dash Open"].isActive === false && dashShops["Dash Open"].lock?.reason === "Locked by hand");
+
+    // If an admin unlocks one of the suspension-locked shops while the seller is
+    // still suspended, that's the admin's decision: switching the seller back on
+    // then leaves it alone.
+    r = await req("PATCH", statusUrl(dashSeller._id), { token: adminToken, body: { status: "suspended", reason: "Again" } });
+    check("suspend again → 3 locked", r.body?.shopsLocked === 3);
+    r = await req("PATCH", lockUrl(dashShops["Dash Third"]._id), { token: adminToken, body: { locked: false } });
+    check("an admin unlocks Dash Third during the suspension → open", r.status === 200 && r.body?.shop?.isActive === true);
+    r = await req("PATCH", statusUrl(dashSeller._id), { token: adminToken, body: { status: "active" } });
+    check("switching the seller back on then unlocks only the other 2", r.body?.shopsUnlocked === 2);
+    dashShops = await dashShopsNow();
+    check("...and Dash Third is simply still open", dashShops["Dash Third"].isActive === true && !dashShops["Dash Third"].lock);
+
+    r = await req("PATCH", statusUrl(customer2._id), { token: adminToken, body: { status: "suspended", reason: "Spam" } });
+    check("suspending a CUSTOMER → both counts are 0", r.status === 200 && r.body?.shopsLocked === 0 && r.body?.shopsUnlocked === 0);
+    await req("PATCH", statusUrl(customer2._id), { token: adminToken, body: { status: "active" } });
+
+    r = await req("PATCH", lockUrl(dashOpenShop._id), { token: adminToken, body: { locked: false } });
+    check("(cleanup) Dash Open unlocked and open", r.status === 200 && r.body?.shop?.isActive === true);
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

@@ -3,6 +3,14 @@ const { z } = require("zod");
 const Listing = require("../models/Listing");
 const Shop = require("../models/Shop");
 const Product = require("../models/Product");
+const parsePagination = require("../utils/pagination");
+const parseBooleanQuery = require("../utils/booleanQuery");
+const {
+  shopFilter,
+  staleFilter,
+  MIN_STALE_DAYS,
+  MAX_STALE_DAYS,
+} = require("../utils/sellerQueries");
 
 // --- Input validation ---------------------------------------------------
 // A WHITELIST for creating a listing. The shop comes from the URL (:shopId), not
@@ -287,7 +295,80 @@ async function listProductListings(req, res, next) {
   });
 }
 
+// GET /api/seller/listings   (seller: items of MY shops)
+// GET /api/admin/listings    (admin: items of EVERY shop)
+// One function, two dashboards. shopFilter() decides which shops count: all of
+// a seller's own shops, or every shop in the marketplace for an admin. So the
+// seller and the admin can never see items in two different ways.
+//
+// Newest first, paginated, and it includes the items of CLOSED and LOCKED
+// shops: the public item list (GET /api/shops/:shopId/products) answers 404 for
+// those, but the seller and the admin both need to see them.
+//
+// Optional filters (they combine):
+//   ?shop=<id>             one shop only (a seller: one of MINE, else 403)
+//   ?inStock=true|false    only items in stock / out of stock
+//   ?staleDays=<1..60>     only OLD prices: not confirmed in that many days, or
+//                          never. Sorted OLDEST first (never-confirmed at the top),
+//                          so the most out-of-date prices are seen first.
+async function listDashboardListings(req, res, next) {
+  const { page, limit, skip } = parsePagination(req.query);
+
+  // Seller: { shop: { $in: myShopIds } }. Admin: {} (every shop).
+  // Either: { shop: id } for ?shop=.
+  const { problem, filter } = await shopFilter(req.user, req.query.shop);
+  if (problem) {
+    return next(problem);
+  }
+
+  // ?inStock=true|false. The text "false" must become the boolean false, and a
+  // typo is a 400 (see utils/booleanQuery.js).
+  const inStock = parseBooleanQuery(req.query.inStock, "inStock");
+  if (inStock.problem) {
+    return next(inStock.problem);
+  }
+  if (inStock.value !== undefined) {
+    filter.inStock = inStock.value;
+  }
+
+  // Newest first by default. For the old-prices view: oldest confirmation first.
+  let sort = { createdAt: -1, _id: -1 };
+
+  if (req.query.staleDays) {
+    // Number("2.5") is 2.5 and Number("abc") is NaN, and isInteger rejects both.
+    // (parseInt would quietly turn "2.5" into 2.)
+    const days = Number(req.query.staleDays);
+    if (!Number.isInteger(days) || days < MIN_STALE_DAYS || days > MAX_STALE_DAYS) {
+      return next({
+        status: 400,
+        message: `staleDays must be a whole number from ${MIN_STALE_DAYS} to ${MAX_STALE_DAYS}`,
+      });
+    }
+    // Adds the { $or: [...] } condition next to `shop` and `inStock`. MongoDB
+    // treats every key of a filter as AND: mine, AND in stock, AND old.
+    Object.assign(filter, staleFilter(days));
+    // In an ascending sort MongoDB puts null (never confirmed) before any date,
+    // which is exactly the order we want.
+    sort = { priceConfirmedAt: 1, _id: 1 };
+  }
+
+  const [listings, total] = await Promise.all([
+    Listing.find(filter)
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .populate("product", "name nameAr imageUrl unit category")
+      // The shop's name so items of different shops can be told apart, and
+      // isActive so the dashboard can mark items of a closed shop.
+      .populate("shop", "name isActive"),
+    Listing.countDocuments(filter),
+  ]);
+
+  res.json({ listings, page, limit, total });
+}
+
 module.exports = {
+  listDashboardListings,
   createListing,
   updateListing,
   deleteListing,
