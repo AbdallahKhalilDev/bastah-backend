@@ -55,4 +55,32 @@ async function shopFilter(user, shopParam) {
   return { filter: { shop: shopParam } };
 }
 
-module.exports = { getMyShopIds, shopFilter };
+// --- Old prices -----------------------------------------------------------
+// ?staleDays= on the seller's item list must be a whole number in this range.
+const MIN_STALE_DAYS = 1;
+const MAX_STALE_DAYS = 60;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// The ONE rule for "this price may be out of date": the seller hasn't confirmed
+// it in the last `days` days, OR has never confirmed it at all.
+//
+// "3 days" here means 72 hours back from right now, not "since midnight three
+// days ago". For "is this price old?", a plain count of hours is enough.
+//
+// `priceConfirmedAt: null` matches BOTH a stored null AND a field that isn't
+// stored at all (listings made before this field existed). That's the same lesson
+// as `?status=active` matching old users in Step 16.
+function staleFilter(days) {
+  const cutoff = new Date(Date.now() - days * DAY_MS);
+  return {
+    $or: [{ priceConfirmedAt: null }, { priceConfirmedAt: { $lt: cutoff } }],
+  };
+}
+
+module.exports = {
+  getMyShopIds,
+  shopFilter,
+  staleFilter,
+  MIN_STALE_DAYS,
+  MAX_STALE_DAYS,
+};

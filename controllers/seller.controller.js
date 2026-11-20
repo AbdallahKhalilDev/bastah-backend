@@ -7,11 +7,34 @@
 // PATCH /api/shops/:id and a price with PATCH /api/listings/:id. This file only
 // answers "show me what's mine", including the things customers can't see
 // (closed shops and their items).
+const mongoose = require("mongoose");
+const { z } = require("zod");
 const Shop = require("../models/Shop");
 const Listing = require("../models/Listing");
 const parsePagination = require("../utils/pagination");
 const { ZONE_POPULATE } = require("../utils/shopRules");
-const { shopFilter } = require("../utils/sellerQueries");
+const {
+  shopFilter,
+  staleFilter,
+  MIN_STALE_DAYS,
+  MAX_STALE_DAYS,
+} = require("../utils/sellerQueries");
+
+// The whitelist for "these prices are still right". Exactly ONE of the two
+// keys is allowed (checked in the controller):
+//   { listingIds: [...] }  these items (e.g. the ones ticked on screen)
+//   { shop: "<id>" }       every item in this one shop
+// The list is capped at 200, so one request can't carry a huge array.
+// `shop` must not be empty: "" would otherwise read as "no shop given" and
+// quietly confirm every item in EVERY shop of the seller.
+const confirmSchema = z.object({
+  listingIds: z
+    .array(z.string(), { error: "listingIds must be a list of listing ids" })
+    .min(1, "listingIds must not be empty")
+    .max(200, "Too many listings (max 200 at a time)")
+    .optional(),
+  shop: z.string({ error: "shop must be a shop id" }).min(1, "Invalid shop id").optional(),
+});
 
 // GET /api/seller/shops
 // Every shop I own, OPEN AND CLOSED, oldest first (so the shop made at sign-up
@@ -40,9 +63,12 @@ async function listMyShops(req, res) {
 // Includes the items of CLOSED shops: the public item list
 // (GET /api/shops/:shopId/products) answers 404 for those.
 //
-// Optional filters:
+// Optional filters (they combine):
 //   ?shop=<id>             one of my shops only (someone else's → 403)
 //   ?inStock=true|false    only items in stock / out of stock
+//   ?staleDays=<1..60>     only OLD prices: not confirmed in that many days, or
+//                          never. Sorted OLDEST first (never-confirmed at the top),
+//                          so the most out-of-date prices are seen first.
 async function listMyListings(req, res, next) {
   const { page, limit, skip } = parsePagination(req.query);
 
@@ -62,9 +88,30 @@ async function listMyListings(req, res, next) {
     filter.inStock = req.query.inStock === "true";
   }
 
+  // Newest first by default. For the old-prices view: oldest confirmation first.
+  let sort = { createdAt: -1, _id: -1 };
+
+  if (req.query.staleDays) {
+    // Number("2.5") is 2.5 and Number("abc") is NaN, and isInteger rejects both.
+    // (parseInt would quietly turn "2.5" into 2.)
+    const days = Number(req.query.staleDays);
+    if (!Number.isInteger(days) || days < MIN_STALE_DAYS || days > MAX_STALE_DAYS) {
+      return next({
+        status: 400,
+        message: `staleDays must be a whole number from ${MIN_STALE_DAYS} to ${MAX_STALE_DAYS}`,
+      });
+    }
+    // Adds the { $or: [...] } condition next to `shop` and `inStock`. MongoDB
+    // treats every key of a filter as AND: mine, AND in stock, AND old.
+    Object.assign(filter, staleFilter(days));
+    // In an ascending sort MongoDB puts null (never confirmed) before any date,
+    // which is exactly the order we want.
+    sort = { priceConfirmedAt: 1, _id: 1 };
+  }
+
   const [listings, total] = await Promise.all([
     Listing.find(filter)
-      .sort({ createdAt: -1, _id: -1 })
+      .sort(sort)
       .skip(skip)
       .limit(limit)
       .populate("product", "name nameAr imageUrl unit category")
@@ -77,4 +124,56 @@ async function listMyListings(req, res, next) {
   res.json({ listings, page, limit, total });
 }
 
-module.exports = { listMyShops, listMyListings };
+// POST /api/seller/listings/confirm
+// "These prices are still right." Marks items as confirmed NOW without changing
+// their price, either a chosen set ({ listingIds }) or a whole shop ({ shop }).
+// Replies { confirmed: <how many items were marked> }.
+//
+// NEW CONCEPT: updateMany.
+// Until now, every change loaded ONE document, changed it, and saved it. That's
+// fine for one item, but a seller confirming 80 prices would mean 80 loads and
+// 80 saves. updateMany sends ONE command to the database: "for every listing that
+// matches this filter, set priceConfirmedAt to now". The database does it all in
+// one go and only reports back how many documents matched.
+//
+// SECURITY lives in the filter: it always includes `shop ∈ my shops`. A listing
+// id belonging to someone else simply doesn't match, so it's never touched, and
+// it isn't counted. We don't need to load and check each listing one by one.
+async function confirmPrices(req, res, next) {
+  const result = confirmSchema.safeParse(req.body);
+  if (!result.success) {
+    const message = result.error.issues[0].message;
+    return next({ status: 400, message });
+  }
+  const { listingIds, shop } = result.data;
+
+  // Exactly one of the two: both, or neither, is a mistake.
+  if ((listingIds === undefined) === (shop === undefined)) {
+    return next({ status: 400, message: "Send either listingIds or shop" });
+  }
+
+  // { shop: { $in: myShopIds } } for a list of ids, or { shop: id } for one of
+  // my shops (someone else's shop → 403, a malformed id → 400).
+  const { problem, filter } = await shopFilter(req.user, shop);
+  if (problem) {
+    return next(problem);
+  }
+
+  if (listingIds) {
+    // Guard each id, or MongoDB would throw on a malformed one (→ 500).
+    if (!listingIds.every((id) => mongoose.Types.ObjectId.isValid(id))) {
+      return next({ status: 400, message: "Invalid listing id" });
+    }
+    filter._id = { $in: listingIds };
+  }
+
+  // Mongoose also refreshes `updatedAt` on an updateMany, as on a save.
+  const update = await Listing.updateMany(filter, {
+    $set: { priceConfirmedAt: new Date() },
+  });
+
+  // matchedCount = how many listings fit the filter (so: mine, and asked for).
+  res.json({ confirmed: update.matchedCount });
+}
+
+module.exports = { listMyShops, listMyListings, confirmPrices };

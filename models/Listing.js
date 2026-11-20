@@ -39,6 +39,25 @@ const listingSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // When the seller last said "this price is right". Bastah's prices change
+    // daily, so this is how we know which prices may be out of date.
+    //
+    // Why not just use `updatedAt`? Because a seller who checks a price and finds
+    // it UNCHANGED has nothing to save: re-saving the same price writes nothing,
+    // so updatedAt never moves. This field records the CHECK, not the change. It
+    // is set when the listing is created, whenever a PATCH sends a price (even
+    // the same one), and by POST /api/seller/listings/confirm.
+    //
+    // The default is null ("never confirmed") ON PURPOSE, not Date.now. Mongoose
+    // fills a default in memory when it loads an older document that has nothing
+    // stored, so Date.now would make every old listing LOOK freshly confirmed in
+    // replies, while the database (which never stored it) would still count it as
+    // old. With null, the reply and the database agree. So listings made before
+    // this field existed count as "never confirmed", and no migration is needed.
+    priceConfirmedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     // Mongoose auto-adds and maintains `createdAt` and `updatedAt` timestamps.

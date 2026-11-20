@@ -3298,6 +3298,135 @@ async function main() {
     r = await req("GET", "/api/seller/listings", { token: tokenFor(shoplessSeller) });
     check("a seller with no shops → empty page, 200", r.status === 200 && r.body?.total === 0);
 
+    // ============ Seller dashboard: old prices (slice 17.2) ============
+    console.log("\nOld prices: priceConfirmedAt + ?staleDays=");
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const daysAgo = (n) => new Date(Date.now() - n * DAY_MS);
+    const isRecent = (date) => date && Date.now() - new Date(date).getTime() < 60 * 1000;
+    const itemNames = (res) => (res.body?.listings || []).map((l) => l.product?.name).join(",");
+    const riceListing = await Listing.findOne({ shop: dashOpenShop._id, product: dashP1._id });
+    const oilListing = await Listing.findOne({ shop: dashOpenShop._id, product: dashP2._id });
+
+    // The 3 dash items were written straight to the database, just like
+    // listings made before this field existed: nothing confirmed.
+    check("an older listing reads as never confirmed (null, not 'now')", riceListing.priceConfirmedAt === null);
+
+    r = await req("GET", "/api/seller/listings?staleDays=3", { token: dashToken });
+    check("never-confirmed items count as old → all 3", r.status === 200 && r.body?.total === 3);
+
+    const dashP4 = await Product.create({ name: "Dash Sugar", nameAr: "سكر", category: category._id });
+    r = await req("POST", `/api/shops/${dashOpenShop._id}/listings`, {
+      token: dashToken,
+      body: { product: dashP4._id.toString(), price: 7 },
+    });
+    const sugarId = r.body?.listing?._id;
+    check("a NEW listing is confirmed right away", r.status === 201 && isRecent(r.body?.listing?.priceConfirmedAt));
+
+    r = await req("GET", "/api/seller/listings?staleDays=3", { token: dashToken });
+    check("...so it's NOT in the old-prices list (still 3)", r.body?.total === 3 && !r.body.listings.some((l) => l._id === sugarId));
+
+    // Now: tea never confirmed · rice 5 days ago · oil 2 days ago · sugar just now.
+    await Listing.updateOne({ _id: riceListing._id }, { priceConfirmedAt: daysAgo(5) });
+    await Listing.updateOne({ _id: oilListing._id }, { priceConfirmedAt: daysAgo(2) });
+
+    r = await req("GET", "/api/seller/listings?staleDays=3", { token: dashToken });
+    check("?staleDays=3 → tea (never) and rice (5 days), not oil (2 days)", r.status === 200 && r.body?.total === 2);
+    check("...oldest first: never-confirmed at the top", itemNames(r) === "Dash Tea,Dash Rice");
+
+    r = await req("GET", "/api/seller/listings?staleDays=1", { token: dashToken });
+    check("?staleDays=1 → oil joins them, still oldest first", itemNames(r) === "Dash Tea,Dash Rice,Dash Oil");
+
+    r = await req("GET", "/api/seller/listings?staleDays=10", { token: dashToken });
+    check("?staleDays=10 → only the never-confirmed tea", itemNames(r) === "Dash Tea");
+
+    r = await req("GET", `/api/seller/listings?shop=${dashOpenShop._id}&staleDays=3`, { token: dashToken });
+    check("combines with ?shop= → only rice", r.body?.total === 1 && itemNames(r) === "Dash Rice");
+
+    r = await req("GET", "/api/seller/listings?staleDays=1&inStock=false", { token: dashToken });
+    check("combines with ?inStock= → only the out-of-stock oil", r.body?.total === 1 && itemNames(r) === "Dash Oil");
+
+    for (const bad of ["0", "61", "abc", "2.5"]) {
+      r = await req("GET", `/api/seller/listings?staleDays=${bad}`, { token: dashToken });
+      check(`?staleDays=${bad} → 400`, r.status === 400 && r.body?.error === "staleDays must be a whole number from 1 to 60");
+    }
+
+    r = await req("PATCH", `/api/listings/${riceListing._id}`, { token: dashToken, body: { price: 10 } });
+    check("PATCH with the SAME price → 200, confirmed now", r.status === 200 && r.body?.listing?.price === 10 && isRecent(r.body?.listing?.priceConfirmedAt));
+
+    r = await req("GET", "/api/seller/listings?staleDays=3", { token: dashToken });
+    check("...so rice leaves the old-prices list", itemNames(r) === "Dash Tea");
+
+    await Listing.updateOne({ _id: oilListing._id }, { priceConfirmedAt: daysAgo(5) });
+    r = await req("PATCH", `/api/listings/${oilListing._id}`, { token: dashToken, body: { inStock: true } });
+    check("PATCH with only inStock → 200, but the price is NOT confirmed", r.status === 200 && !isRecent(r.body?.listing?.priceConfirmedAt));
+
+    r = await req("GET", "/api/seller/listings?staleDays=3", { token: dashToken });
+    check("...so oil is still in the old-prices list", itemNames(r) === "Dash Tea,Dash Oil");
+
+    console.log("\nPOST /api/seller/listings/confirm");
+    const confirmUrl = "/api/seller/listings/confirm";
+
+    r = await req("POST", confirmUrl, { body: { shop: dashOpenShop._id.toString() } });
+    check("no token → 401", r.status === 401);
+    r = await req("POST", confirmUrl, { token: customerToken, body: { shop: dashOpenShop._id.toString() } });
+    check("a customer → 403", r.status === 403);
+
+    r = await req("POST", confirmUrl, { token: dashToken, body: {} });
+    check("neither listingIds nor shop → 400", r.status === 400 && r.body?.error === "Send either listingIds or shop");
+    r = await req("POST", confirmUrl, {
+      token: dashToken,
+      body: { listingIds: [oilListing._id.toString()], shop: dashOpenShop._id.toString() },
+    });
+    check("both → 400", r.status === 400 && r.body?.error === "Send either listingIds or shop");
+    r = await req("POST", confirmUrl, { token: dashToken, body: { listingIds: [] } });
+    check("an empty list → 400", r.status === 400 && r.body?.error === "listingIds must not be empty");
+    r = await req("POST", confirmUrl, { token: dashToken, body: { listingIds: "abc" } });
+    check("listingIds that isn't a list → 400", r.status === 400);
+    r = await req("POST", confirmUrl, { token: dashToken, body: { listingIds: ["banana"] } });
+    check("a malformed listing id → 400 Invalid listing id", r.status === 400 && r.body?.error === "Invalid listing id");
+    r = await req("POST", confirmUrl, {
+      token: dashToken,
+      body: { listingIds: Array(201).fill(oilListing._id.toString()) },
+    });
+    check("more than 200 ids → 400", r.status === 400 && r.body?.error === "Too many listings (max 200 at a time)");
+    r = await req("POST", confirmUrl, { token: dashToken, body: { shop: "" } });
+    check("shop: \"\" → 400 (it must NOT mean 'all my shops')", r.status === 400 && r.body?.error === "Invalid shop id");
+    r = await req("POST", confirmUrl, { token: dashToken, body: { shop: "banana" } });
+    check("a malformed shop id → 400", r.status === 400 && r.body?.error === "Invalid shop id");
+    r = await req("POST", confirmUrl, { token: dashToken, body: { shop: otherShop._id.toString() } });
+    check("someone else's shop → 403", r.status === 403);
+
+    r = await req("GET", "/api/seller/listings?staleDays=3", { token: dashToken });
+    check("none of those bad requests confirmed anything", itemNames(r) === "Dash Tea,Dash Oil");
+
+    r = await req("POST", confirmUrl, {
+      token: dashToken,
+      body: { listingIds: [oilListing._id.toString(), notMineListing._id.toString(), FAKE_ID] },
+    });
+    check("by ids: only MY listing counts → { confirmed: 1 }", r.status === 200 && r.body?.confirmed === 1);
+    const notMineAfter = await Listing.findById(notMineListing._id);
+    check("...someone else's listing was NOT touched", notMineAfter.priceConfirmedAt === null);
+    const oilAfter = await Listing.findById(oilListing._id);
+    check("...mine is confirmed now, and its price is unchanged", isRecent(oilAfter.priceConfirmedAt) && oilAfter.price === 20);
+
+    r = await req("POST", confirmUrl, { token: dashToken, body: { shop: dashClosedShop._id.toString() } });
+    check("by shop: every item of my (closed) shop → { confirmed: 1 }", r.status === 200 && r.body?.confirmed === 1);
+
+    r = await req("GET", "/api/seller/listings?staleDays=3", { token: dashToken });
+    check("...and now no old prices are left", r.status === 200 && r.body?.total === 0);
+
+    r = await req("POST", confirmUrl, { token: dashToken, body: { shop: dashOpenShop._id.toString() } });
+    check("confirming a shop again just re-counts its 3 items (fine to repeat)", r.status === 200 && r.body?.confirmed === 3);
+
+    console.log("\nGET /api/products/:id/listings shows when each price was checked");
+    r = await req("GET", `/api/products/${dashP1._id}/listings`);
+    const compareRows = r.body?.listings || [];
+    const dashRow = compareRows.find((l) => l.shop?.name === "Dash Open");
+    const otherRow = compareRows.find((l) => l.shop?.name === "Other Shop");
+    check("every row carries priceConfirmedAt", compareRows.length === 2 && compareRows.every((l) => "priceConfirmedAt" in l));
+    check("the confirmed shop shows a recent date", isRecent(dashRow?.priceConfirmedAt));
+    check("a never-confirmed price shows null", otherRow?.priceConfirmedAt === null);
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

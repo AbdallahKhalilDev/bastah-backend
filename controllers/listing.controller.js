@@ -83,6 +83,8 @@ async function createListing(req, res, next) {
       product: data.product,
       price: data.price,
       inStock: data.inStock,
+      // A brand-new price was just entered, so it's confirmed as of now.
+      priceConfirmedAt: new Date(),
     });
 
     // Populate the product before replying, so the response shows what was
@@ -146,6 +148,13 @@ async function updateListing(req, res, next) {
   // 5. Copy the validated fields onto the document and save. save() runs the
   //    schema validators and refreshes the updatedAt timestamp.
   Object.assign(listing, data);
+
+  // Sending a price at all means "I've checked this price", even when it's the
+  // same number as before. That counts as a confirmation. A PATCH with only
+  // `inStock` says nothing about the price, so it doesn't.
+  if (data.price !== undefined) {
+    listing.priceConfirmedAt = new Date();
+  }
   await listing.save();
 
   await listing.populate("product", "name nameAr imageUrl unit");
@@ -248,6 +257,9 @@ async function listProductListings(req, res, next) {
       _id: l._id,
       price: l.price,
       inStock: l.inStock,
+      // When the shop last confirmed this price, so the app can say "price
+      // checked 2 days ago". null = never confirmed (an older listing).
+      priceConfirmedAt: l.priceConfirmedAt,
       shop: {
         _id: l.shop._id,
         name: l.shop.name,

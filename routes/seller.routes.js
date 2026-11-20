@@ -2,7 +2,11 @@ const express = require("express");
 const asyncHandler = require("../utils/asyncHandler");
 const auth = require("../middleware/auth");
 const requireRole = require("../middleware/requireRole");
-const { listMyShops, listMyListings } = require("../controllers/seller.controller");
+const {
+  listMyShops,
+  listMyListings,
+  confirmPrices,
+} = require("../controllers/seller.controller");
 
 const router = express.Router();
 
@@ -15,6 +19,7 @@ const router = express.Router();
 router.use(auth, requireRole("seller"));
 
 router.get("/shops", asyncHandler(listMyShops)); // all my shops, closed ones too
-router.get("/listings", asyncHandler(listMyListings)); // my items, paginated
+router.get("/listings", asyncHandler(listMyListings)); // my items, paginated; ?staleDays= for old prices
+router.post("/listings/confirm", asyncHandler(confirmPrices)); // "these prices are still right"
 
 module.exports = router;
