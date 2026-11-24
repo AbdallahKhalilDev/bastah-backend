@@ -3,6 +3,7 @@ const { z } = require("zod");
 const Review = require("../models/Review");
 const Shop = require("../models/Shop");
 const parsePagination = require("../utils/pagination");
+const { notifyNewReview } = require("../utils/alertNotifications");
 
 // --- Input validation ---------------------------------------------------
 // A WHITELIST for creating a review. Only these two keys are accepted; zod strips
@@ -124,6 +125,10 @@ async function createReview(req, res, next) {
   // 5. Now that a new review exists, recompute the shop's cached rating from ALL
   //    its reviews (this new one included) and save it onto the shop.
   await recalcShopRating(req.params.shopId);
+
+  // 5b. Tell the shop's owner about the new review. Only here, on CREATE:
+  //     editing a review doesn't notify anyone. Never throws.
+  await notifyNewReview(shop, review, req.user.id);
 
   // 6. Respond 201 (Created) with the review we just made.
   res.status(201).json({ review });

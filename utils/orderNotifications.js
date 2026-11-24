@@ -1,5 +1,5 @@
 const Shop = require("../models/Shop");
-const notify = require("./notify");
+const { notify } = require("./notify");
 const {
   orderPlaced,
   orderStatusForCustomer,

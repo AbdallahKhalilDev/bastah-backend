@@ -4624,7 +4624,7 @@ async function main() {
     check("no token → 401 on all six routes", noToken.every((x) => x.status === 401));
 
     console.log("\nnotify() never throws");
-    const notify = require("../utils/notify");
+    const { notify } = require("../utils/notify");
     const goodMessage = { title: "t", titleAr: "t", body: "b", bodyAr: "b" };
     let sent = await notify({ recipients: [nStranger._id], event: "not_a_real_event", message: goodMessage });
     check("an unknown event → resolves to 0, no crash", sent === 0);
@@ -4635,6 +4635,162 @@ async function main() {
     sent = await notify({ recipients: [nStranger._id], event: "order_accepted", message: goodMessage, actorId: nStranger._id });
     check("the person who acted is never told → 0", sent === 0);
     check("...so the stranger has exactly the one", (await inbox(nStrangerToken)).body?.total === 1);
+
+    // ============ Notifications: alerts + announcements (Step 15.2) ============
+    const aSeller = await User.create({ name: "Alert Seller", email: "aseller@test.com", passwordHash: "x", role: "seller" });
+    const aCustomer = await User.create({ name: "Alert Customer", email: "acustomer@test.com", passwordHash: "x", role: "customer" });
+    const aCustomer2 = await User.create({ name: "Alert Customer 2", email: "acustomer2@test.com", passwordHash: "x", role: "customer" });
+    const aBystander = await User.create({ name: "Alert Bystander", email: "abystander@test.com", passwordHash: "x", role: "customer" });
+    const aSellerToken = tokenFor(aSeller);
+    const aCustomerToken = tokenFor(aCustomer);
+    const aCustomer2Token = tokenFor(aCustomer2);
+    const aBystanderToken = tokenFor(aBystander);
+
+    const aShop = await Shop.create({ owner: aSeller._id, name: "Alert Shop", phone: "61" });
+    const aOtherShop = await Shop.create({ owner: aSeller._id, name: "Alert Other Shop", phone: "62" });
+    const aSugar = await Product.create({ name: "Alert Sugar", nameAr: "سكر التنبيه", category: category._id, unit: "kg" });
+    // The same product at two shops: two different prices, two different listings.
+    const aListing = await Listing.create({ shop: aShop._id, product: aSugar._id, price: 12 });
+    const aOtherListing = await Listing.create({ shop: aOtherShop._id, product: aSugar._id, price: 11 });
+    await req("POST", "/api/cart/items", { token: aCustomerToken, body: { listing: aListing.id, quantity: 1 } });
+    await req("POST", "/api/cart/items", { token: aBystanderToken, body: { listing: aOtherListing.id, quantity: 1 } });
+
+    const editListing = (body, token = aSellerToken) => req("PATCH", `/api/listings/${aListing.id}`, { token, body });
+    const alerts = (token, query = "") => inbox(token, "?type=alert" + query);
+
+    console.log("\nPrice drop alerts (for items in a customer's cart)");
+
+    r = await editListing({ price: 9 });
+    check("the seller lowers the price 12 → 9 → 200", r.status === 200);
+    r = await alerts(aCustomerToken);
+    let alert = r.body?.notifications?.[0];
+    check("the customer with it in their cart gets one price_drop alert", r.body?.total === 1 && alert?.event === "price_drop" && alert?.type === "alert");
+    check("...linking the listing, the product and the shop", alert?.link?.listing === aListing.id && alert?.link?.product === String(aSugar._id) && alert?.link?.shop === String(aShop._id));
+    check("...English text: new price, old price", alert?.title === "Price drop" && alert?.body === "Alert Sugar at Alert Shop is now ₪9.00 (was ₪12.00). It's in your cart.");
+    check("...Arabic text uses the Arabic product name", alert?.titleAr === "انخفض السعر" && alert?.bodyAr?.includes("سكر التنبيه") && alert?.bodyAr?.includes("₪9.00") && alert?.bodyAr?.includes("₪12.00"));
+    check("same product from ANOTHER shop in the cart → no alert (a different price)", (await inbox(aBystanderToken)).body?.total === 0);
+    check("an empty cart → no alert", (await inbox(aCustomer2Token)).body?.total === 0);
+    check("the seller who changed it → nothing", (await inbox(aSellerToken)).body?.total === 0);
+
+    await editListing({ price: 8 });
+    r = await alerts(aCustomerToken);
+    check("a second drop while the first is unread → still ONE alert", r.body?.total === 1);
+    check("...showing the latest price", r.body?.notifications?.[0]?.body?.includes("₪8.00 (was ₪9.00)"));
+
+    await editListing({ price: 10 });
+    await editListing({ price: 10 });
+    r = await alerts(aCustomerToken);
+    check("a price rise, then the same price again → nothing new", r.body?.total === 1 && r.body.notifications[0].body.includes("₪8.00"));
+
+    await req("PATCH", `/api/notifications/${r.body?.notifications?.[0]?._id}/read`, { token: aCustomerToken });
+    await editListing({ price: 7 });
+    r = await alerts(aCustomerToken);
+    check("once read, the next drop is a NEW alert (2 in total, 1 unread)", r.body?.total === 2 && (await alerts(aCustomerToken, "&unread=true")).body?.total === 1);
+
+    await editListing({ inStock: false });
+    check("out of stock → no alert", (await alerts(aCustomerToken)).body?.total === 2);
+    await editListing({ price: 6 });
+    check("a price drop while out of stock → no alert", (await alerts(aCustomerToken)).body?.total === 2);
+
+    await editListing({ inStock: true });
+    r = await alerts(aCustomerToken);
+    alert = r.body?.notifications?.[0];
+    check("back in stock → back_in_stock alert", alert?.event === "back_in_stock" && alert?.title === "Back in stock");
+    check("...with the current price", alert?.body === "Alert Sugar at Alert Shop is back in stock, ₪6.00. It's in your cart.");
+    check("...replacing the unread price alert for the same item (still 2, 1 unread)", r.body?.total === 2 && (await unreadCount(aCustomerToken)) === 1);
+
+    r = await req("POST", "/api/seller/listings/confirm", { token: aSellerToken, body: { listingIds: [aListing.id] } });
+    check("confirming the price (no change) → no alert", r.status === 200 && (await alerts(aCustomerToken)).body?.total === 2);
+
+    await req("POST", "/api/cart/items", { token: aCustomer2Token, body: { listing: aListing.id, quantity: 3 } });
+    await editListing({ price: 5 });
+    check("every cart that holds it is told: the second customer gets one", (await alerts(aCustomer2Token)).body?.total === 1);
+    r = await alerts(aCustomerToken);
+    check("...and the first customer's unread alert is replaced by the newest", r.body?.total === 2 && r.body.notifications[0].event === "price_drop" && r.body.notifications[0].body.includes("₪5.00 (was ₪6.00)"));
+
+    await req("PATCH", `/api/admin/shops/${aShop._id}/lock`, { token: adminToken, body: { locked: true, reason: "alert test" } });
+    r = await editListing({ price: 4 }, adminToken);
+    check("shop locked: a price drop → 200 but no alert", r.status === 200 && (await alerts(aCustomer2Token)).body?.notifications?.[0]?.body?.includes("₪5.00"));
+    await req("PATCH", `/api/admin/shops/${aShop._id}/lock`, { token: adminToken, body: { locked: false } });
+
+    await req("PATCH", `/api/admin/products/${aSugar._id}/active`, { token: adminToken, body: { isActive: false } });
+    r = await editListing({ price: 3 });
+    check("product hidden by an admin: a price drop → 200 but no alert", r.status === 200 && (await alerts(aCustomer2Token)).body?.notifications?.[0]?.body?.includes("₪5.00"));
+    await req("PATCH", `/api/admin/products/${aSugar._id}/active`, { token: adminToken, body: { isActive: true } });
+
+    await editListing({ price: 2 });
+    r = await alerts(aCustomer2Token);
+    check("shop and product back to normal → alerts work again", r.body?.total === 1 && r.body.notifications[0].body.includes("₪2.00 (was ₪3.00)"));
+
+    console.log("\nNew review alerts (to the shop's owner)");
+
+    r = await req("POST", `/api/shops/${aShop._id}/reviews`, { token: aCustomerToken, body: { rating: 4, comment: "Good sugar" } });
+    check("a customer reviews the shop → 201", r.status === 201);
+    const aReviewId = r.body?.review?._id;
+    r = await alerts(aSellerToken);
+    alert = r.body?.notifications?.[0];
+    check("the owner gets a new_review alert", r.body?.total === 1 && alert?.event === "new_review" && alert?.type === "alert");
+    check("...naming the shop and the stars, in both languages", alert?.body === "Alert Shop got a 4★ review." && alert?.bodyAr === "حصل Alert Shop على تقييم 4★.");
+    check("...linking the shop", alert?.link?.shop === String(aShop._id));
+    check("the reviewer isn't told", (await inbox(aCustomerToken)).body?.notifications?.every((n) => n.event !== "new_review"));
+
+    r = await req("PATCH", `/api/reviews/${aReviewId}`, { token: aCustomerToken, body: { rating: 2 } });
+    check("editing the review → 200, but no second alert", r.status === 200 && (await alerts(aSellerToken)).body?.total === 1);
+
+    console.log("\nPOST /api/admin/announcements");
+
+    const announcement = { title: "  Eid opening hours  ", titleAr: "ساعات العمل في العيد", body: "Shops close at 2pm on Eid.", bodyAr: "تغلق المحلات الساعة 2 ظهراً في العيد." };
+
+    r = await req("POST", "/api/admin/announcements", { body: announcement });
+    check("no token → 401", r.status === 401);
+    r = await req("POST", "/api/admin/announcements", { token: aCustomerToken, body: announcement });
+    check("a customer → 403", r.status === 403);
+    r = await req("POST", "/api/admin/announcements", { token: aSellerToken, body: announcement });
+    check("a seller → 403", r.status === 403);
+
+    r = await req("POST", "/api/admin/announcements", { token: adminToken, body: {} });
+    check("nothing sent → 400 'Title is required'", r.status === 400 && r.body?.error === "Title is required");
+    r = await req("POST", "/api/admin/announcements", { token: adminToken, body: { ...announcement, titleAr: undefined } });
+    check("no Arabic title → 400 'Arabic title is required'", r.status === 400 && r.body?.error === "Arabic title is required");
+    r = await req("POST", "/api/admin/announcements", { token: adminToken, body: { ...announcement, title: "x".repeat(101) } });
+    check("a 101-character title → 400", r.status === 400 && r.body?.error === "Title is too long (max 100 characters)");
+    r = await req("POST", "/api/admin/announcements", { token: adminToken, body: { ...announcement, audience: "everyone" } });
+    check("an unknown audience → 400", r.status === 400 && r.body?.error === "Audience must be all, customers or sellers");
+
+    const aSuspended = await User.create({ name: "Alert Suspended", email: "asuspended@test.com", passwordHash: "x", role: "customer", status: "suspended" });
+    const activeCount = (roles) => User.countDocuments({ role: { $in: roles }, status: { $ne: "suspended" } });
+
+    let expected = await activeCount(["customer"]);
+    r = await req("POST", "/api/admin/announcements", { token: adminToken, body: { ...announcement, audience: "customers" } });
+    check("audience customers → 201, sent to every customer who isn't suspended", r.status === 201 && r.body?.audience === "customers" && r.body?.sent === expected);
+    r = await inbox(aCustomerToken, "?type=announcement");
+    alert = r.body?.notifications?.[0];
+    check("a customer gets it: event + type announcement", r.body?.total === 1 && alert?.event === "announcement" && alert?.type === "announcement");
+    check("...with the admin's text as written (spaces trimmed)", alert?.title === "Eid opening hours" && alert?.bodyAr === announcement.bodyAr);
+    check("a seller doesn't get the customers' one", (await inbox(aSellerToken, "?type=announcement")).body?.total === 0);
+    check("a suspended customer doesn't get it", (await Notification.countDocuments({ recipient: aSuspended._id })) === 0);
+
+    expected = await activeCount(["seller"]);
+    r = await req("POST", "/api/admin/announcements", { token: adminToken, body: { ...announcement, audience: "sellers" } });
+    check("audience sellers → sent to every seller who isn't suspended", r.status === 201 && r.body?.sent === expected);
+    check("...the seller gets it, the customer doesn't get a second one", (await inbox(aSellerToken, "?type=announcement")).body?.total === 1 && (await inbox(aCustomerToken, "?type=announcement")).body?.total === 1);
+
+    expected = await activeCount(["customer", "seller"]);
+    r = await req("POST", "/api/admin/announcements", { token: adminToken, body: announcement });
+    check("no audience → everyone (customers + sellers)", r.status === 201 && r.body?.audience === "all" && r.body?.sent === expected);
+    check("...both got it", (await inbox(aSellerToken, "?type=announcement")).body?.total === 2 && (await inbox(aCustomerToken, "?type=announcement")).body?.total === 2);
+
+    const adminIds = (await User.find({ role: "admin" }).select("_id")).map((u) => u._id);
+    check("no admin ever receives an announcement", (await Notification.countDocuments({ type: "announcement", recipient: { $in: adminIds } })) === 0);
+
+    const { sendNotifications } = require("../utils/notify");
+    let threw = false;
+    try {
+      await sendNotifications({ recipients: [aCustomer._id], event: "not_a_real_event", message: goodMessage });
+    } catch {
+      threw = true;
+    }
+    check("sendNotifications (used by announcements) DOES report errors", threw);
 
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body

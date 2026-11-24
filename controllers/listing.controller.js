@@ -12,6 +12,7 @@ const {
   MIN_STALE_DAYS,
   MAX_STALE_DAYS,
 } = require("../utils/sellerQueries");
+const { notifyListingChanged } = require("../utils/alertNotifications");
 
 // --- Input validation ---------------------------------------------------
 // A WHITELIST for creating a listing. The shop comes from the URL (:shopId), not
@@ -159,7 +160,11 @@ async function updateListing(req, res, next) {
   }
   const data = result.data;
 
-  // 5. Copy the validated fields onto the document and save. save() runs the
+  // 5. Remember the price and stock as they are NOW, before the edit. The
+  //    price-drop alert in step 6 compares old with new.
+  const before = { price: listing.price, inStock: listing.inStock };
+
+  //    Copy the validated fields onto the document and save. save() runs the
   //    schema validators and refreshes the updatedAt timestamp.
   Object.assign(listing, data);
 
@@ -170,6 +175,11 @@ async function updateListing(req, res, next) {
     listing.priceConfirmedAt = new Date();
   }
   await listing.save();
+
+  // 6. Cheaper now, or back in stock? Tell the customers who have it in their
+  //    cart. Decided entirely in utils/alertNotifications.js, and it never
+  //    throws, so the saved edit always gets its 200.
+  await notifyListingChanged(listing, before, shop, req.user.id);
 
   await listing.populate("product", "name nameAr imageUrl unit");
   res.json({ listing });

@@ -27,6 +27,12 @@ const EVENT_TYPES = {
   order_delivering: "order",
   order_completed: "order",
   order_cancelled: "order",
+
+  // Slice 15.2: alerts and announcements.
+  price_drop: "alert", // → customers with that item in their cart
+  back_in_stock: "alert", // → customers with that item in their cart
+  new_review: "alert", // → the shop's owner
+  announcement: "announcement", // → everyone an admin chose (never admins)
 };
 
 // Just the event names, for the model's enum.

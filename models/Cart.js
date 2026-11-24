@@ -102,4 +102,12 @@ const cartSchema = new mongoose.Schema(
 
 // A "model" is the tool we use to actually read/write Carts in the database.
 // Mongoose will use the collection named "carts" (lowercased + pluralized).
+// --- Index: "which carts hold this listing?" --------------------------------
+// When a seller lowers a price, the price-drop alert (utils/alertNotifications.js)
+// must find every cart that holds that listing. `items` is an ARRAY, so this is
+// a MULTIKEY index: MongoDB adds one entry per item in each cart, so a cart with
+// 5 items is found by any of its 5 listings. Same idea as the
+// deliveryZones.area index on Shop. Not unique: many carts can hold one listing.
+cartSchema.index({ "items.listing": 1 });
+
 module.exports = mongoose.model("Cart", cartSchema);

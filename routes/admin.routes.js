@@ -23,6 +23,7 @@ const {
 } = require("../controllers/adminProduct.controller");
 const { categories, areas } = require("../controllers/adminLookup.controller");
 const { getSiteStats, listAllReviews } = require("../controllers/adminOverview.controller");
+const { sendAnnouncement } = require("../controllers/adminAnnouncement.controller");
 
 const router = express.Router();
 
@@ -74,5 +75,9 @@ router.patch("/areas/:id", asyncHandler(areas.update)); // rename, hide/show
 // Removing a review is the existing DELETE /api/reviews/:id.
 router.get("/stats", asyncHandler(getSiteStats));
 router.get("/reviews", asyncHandler(listAllReviews));
+
+// Notifications (slice 15.2): one message to the inbox of all customers, all
+// sellers, or both (never admins; suspended accounts are skipped).
+router.post("/announcements", asyncHandler(sendAnnouncement));
 
 module.exports = router;

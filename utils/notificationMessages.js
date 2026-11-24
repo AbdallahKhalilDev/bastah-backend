@@ -124,8 +124,48 @@ function orderStatusForSeller(order, shopName, actorRole) {
   };
 }
 
+// --- ALERTS ------------------------------------------------------------------
+
+// To a CUSTOMER: something in their cart got cheaper.
+function priceDrop(product, shopName, newPrice, oldPrice) {
+  return {
+    title: "Price drop",
+    titleAr: "انخفض السعر",
+    body:
+      `${product.name} at ${shopName} is now ${price(newPrice)} ` +
+      `(was ${price(oldPrice)}). It's in your cart.`,
+    bodyAr:
+      `${product.nameAr} في ${shopName} أصبح بسعر ${price(newPrice)} ` +
+      `(كان ${price(oldPrice)}). المنتج موجود في سلتك.`,
+  };
+}
+
+// To a CUSTOMER: something in their cart can be bought again.
+function backInStock(product, shopName, currentPrice) {
+  return {
+    title: "Back in stock",
+    titleAr: "عاد للتوفر",
+    body: `${product.name} at ${shopName} is back in stock, ${price(currentPrice)}. It's in your cart.`,
+    bodyAr: `${product.nameAr} في ${shopName} متوفر من جديد بسعر ${price(currentPrice)}. المنتج موجود في سلتك.`,
+  };
+}
+
+// To a SELLER: one of their shops got a new review. Only the stars, not the
+// comment: a comment can be long, and the tap opens the shop's reviews anyway.
+function newReview(shopName, rating) {
+  return {
+    title: "New review",
+    titleAr: "تقييم جديد",
+    body: `${shopName} got a ${rating}★ review.`,
+    bodyAr: `حصل ${shopName} على تقييم ${rating}★.`,
+  };
+}
+
 module.exports = {
   orderPlaced,
   orderStatusForCustomer,
   orderStatusForSeller,
+  priceDrop,
+  backInStock,
+  newReview,
 };
