@@ -94,6 +94,12 @@ function publicUser(user) {
     phone: user.phone,
     role: user.role,
     status: user.status,
+    // The two mute switches, for the profile page. `!== false` means "on unless
+    // switched off", so an account with nothing stored shows both on.
+    notificationPrefs: {
+      offers: user.notificationPrefs?.offers !== false,
+      alerts: user.notificationPrefs?.alerts !== false,
+    },
     createdAt: user.createdAt,
   };
 }

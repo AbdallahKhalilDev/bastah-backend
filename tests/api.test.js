@@ -5112,6 +5112,87 @@ async function main() {
     r = await req("GET", `/api/shops/${FAKE_ID}/offers`);
     check("an unknown shop → 404", r.status === 404);
 
+    // ============ Notifications: mute settings on the profile (Step 15.5) ============
+    const mSeller = await User.create({ name: "Mute Seller", email: "mseller@test.com", passwordHash: "x", role: "seller" });
+    const mCustomer = await User.create({ name: "Mute Customer", email: "mcustomer@test.com", passwordHash: "x", role: "customer" });
+    const mOther = await User.create({ name: "Mute Other", email: "mother@test.com", passwordHash: "x", role: "customer" });
+    const mSellerToken = tokenFor(mSeller);
+    const mCustomerToken = tokenFor(mCustomer);
+    const mOtherToken = tokenFor(mOther);
+    const mShop = await Shop.create({ owner: mSeller._id, name: "Mute Shop", phone: "91" });
+    const mTea = await Product.create({ name: "Mute Tea", nameAr: "شاي", category: category._id });
+    const mListing = await Listing.create({ shop: mShop._id, product: mTea._id, price: 10 });
+    // Both customers have ordered at the shop AND have the tea in their cart, so
+    // both would get its offers and its price alerts. One of them mutes.
+    const mOrderLine = { listing: mListing._id, product: mTea._id, productName: "Mute Tea", productNameAr: "شاي", priceAtOrder: 10, quantity: 1 };
+    const mOrder = await Order.create({ customer: mCustomer._id, shop: mShop._id, items: [mOrderLine], subtotal: 10, total: 10, contactPhone: "0599", status: "pending" });
+    await Order.create({ customer: mOther._id, shop: mShop._id, items: [mOrderLine], subtotal: 10, total: 10, contactPhone: "0599", status: "completed" });
+    await req("POST", "/api/cart/items", { token: mCustomerToken, body: { listing: mListing.id, quantity: 1 } });
+    await req("POST", "/api/cart/items", { token: mOtherToken, body: { listing: mListing.id, quantity: 1 } });
+
+    const patchMe = (token, body) => req("PATCH", "/api/auth/me", { token, body });
+    const countOf = (who, type) => Notification.countDocuments({ recipient: who._id, type });
+    const postMuteOffer = (title) =>
+      req("POST", "/api/admin/offers", { token: adminToken, body: { shop: String(mShop._id), title, titleAr: title, body: "b", bodyAr: "b", endsAt: inAWeek } });
+
+    console.log("\nMute settings on the profile (GET/PATCH /api/auth/me)");
+
+    r = await req("POST", "/api/auth/register", { body: { name: "Mute Newcomer", email: "mutenew@test.com", password: "secret123", phone: "0599123123" } });
+    check("a new account starts with both switches on", r.status === 201 && r.body?.user?.notificationPrefs?.offers === true && r.body?.user?.notificationPrefs?.alerts === true);
+    r = await req("GET", "/api/auth/me", { token: mCustomerToken });
+    check("GET /api/auth/me shows them", r.status === 200 && r.body?.user?.notificationPrefs?.offers === true && r.body.user.notificationPrefs.alerts === true);
+
+    r = await patchMe(mCustomerToken, { notificationPrefs: { offers: false } });
+    check("switch offers off → 200, alerts left as they were", r.status === 200 && r.body?.user?.notificationPrefs?.offers === false && r.body.user.notificationPrefs.alerts === true);
+    r = await req("GET", "/api/auth/me", { token: mCustomerToken });
+    check("...and it's saved", r.body?.user?.notificationPrefs?.offers === false);
+
+    r = await patchMe(mCustomerToken, { notificationPrefs: { offers: "no" } });
+    check("a switch that isn't true/false → 400", r.status === 400 && r.body?.error === "offers must be true or false");
+    r = await patchMe(mCustomerToken, { notificationPrefs: "off" });
+    check("settings that aren't an object → 400", r.status === 400 && r.body?.error === "notificationPrefs must be an object");
+    r = await patchMe(mCustomerToken, { name: "Mute Customer Renamed" });
+    check("editing the name still works, and leaves the switches alone", r.status === 200 && r.body?.user?.name === "Mute Customer Renamed" && r.body.user.notificationPrefs.offers === false);
+
+    console.log("\nMuted offers and alerts aren't sent");
+
+    r = await postMuteOffer("Tea deal");
+    check("an offer reaches only the customer who didn't mute offers", r.status === 201 && r.body?.notified === 1 && (await countOf(mOther, "offer")) === 1 && (await countOf(mCustomer, "offer")) === 0);
+
+    r = await patchMe(mCustomerToken, { notificationPrefs: { alerts: false } });
+    check("switch alerts off too → both off", r.body?.user?.notificationPrefs?.offers === false && r.body.user.notificationPrefs.alerts === false);
+    await req("PATCH", `/api/listings/${mListing.id}`, { token: mSellerToken, body: { price: 8 } });
+    check("a price drop alerts only the customer who didn't mute alerts", (await countOf(mOther, "alert")) === 1 && (await countOf(mCustomer, "alert")) === 0);
+
+    await patchMe(mSellerToken, { notificationPrefs: { alerts: false } });
+    r = await req("POST", `/api/shops/${mShop._id}/reviews`, { token: mCustomerToken, body: { rating: 5 } });
+    check("a seller who muted alerts gets no new_review", r.status === 201 && (await countOf(mSeller, "alert")) === 0);
+
+    console.log("\nWhat can't be muted still arrives");
+
+    await req("PATCH", `/api/orders/${mOrder._id}/status`, { token: mSellerToken, body: { status: "accepted" } });
+    check("order updates still arrive (both switches off)", (await countOf(mCustomer, "order")) === 1);
+    await req("POST", "/api/admin/announcements", { token: adminToken, body: { title: "t", titleAr: "t", body: "b", bodyAr: "b", audience: "customers" } });
+    check("announcements still arrive", (await countOf(mCustomer, "announcement")) === 1);
+    await req("PATCH", `/api/admin/shops/${mShop._id}/verify`, { token: adminToken, body: { isVerified: true } });
+    check("account notices still arrive (the seller muted alerts)", (await countOf(mSeller, "account")) === 1);
+
+    console.log("\nAn account with no settings stored counts as switched on");
+
+    await User.updateOne({ _id: mOther._id }, { $unset: { notificationPrefs: 1 } });
+    const rawOther = await User.collection.findOne({ _id: mOther._id });
+    check("(setup) nothing stored in the database", rawOther && rawOther.notificationPrefs === undefined);
+    r = await req("GET", "/api/auth/me", { token: mOtherToken });
+    check("its profile shows both switches on", r.body?.user?.notificationPrefs?.offers === true && r.body.user.notificationPrefs.alerts === true);
+    r = await postMuteOffer("Tea deal 2");
+    check("...and it still receives offers", r.body?.notified === 1 && (await countOf(mOther, "offer")) === 2);
+
+    console.log("\nSwitching back on");
+    r = await patchMe(mCustomerToken, { notificationPrefs: { offers: true } });
+    check("offers back on → 200 (alerts still off)", r.body?.user?.notificationPrefs?.offers === true && r.body.user.notificationPrefs.alerts === false);
+    r = await postMuteOffer("Tea deal 3");
+    check("...the next offer reaches them again", r.body?.notified === 2 && (await countOf(mCustomer, "offer")) === 1);
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

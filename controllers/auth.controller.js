@@ -25,7 +25,21 @@ const {
 // `.partial()` makes both optional, because a PATCH changes only what you send.
 // Email and role are NOT in this whitelist, so they're silently dropped: the
 // email is the login id, and the role never changes.
-const updateMeSchema = accountSchema.pick({ name: true, phone: true }).partial();
+//
+// Since Step 15 it also takes the two notification switches. Both are optional,
+// and each must be a real true/false (the text "false" is NOT accepted: in
+// JavaScript any non-empty text counts as true, so we never guess).
+const notificationPrefsSchema = z.object(
+  {
+    offers: z.boolean({ error: "offers must be true or false" }).optional(),
+    alerts: z.boolean({ error: "alerts must be true or false" }).optional(),
+  },
+  { error: "notificationPrefs must be an object" }
+);
+const updateMeSchema = accountSchema
+  .pick({ name: true, phone: true })
+  .partial()
+  .extend({ notificationPrefs: notificationPrefsSchema.optional() });
 
 // PATCH /api/auth/me/password. The current password is only compared with the
 // stored hash, so it gets no length rules (an older account may have a longer
@@ -196,7 +210,8 @@ async function me(req, res, next) {
 }
 
 // PATCH /api/auth/me  (any logged-in user: customer, seller or admin)
-// Change your own name and/or phone. Only the fields you send change.
+// Change your own name, phone and/or notification switches. Only the fields you
+// send change.
 async function updateMe(req, res, next) {
   // 1. Validate against the whitelist. email / role / passwordHash in the body
   //    are silently dropped, so this can never change them.
@@ -215,7 +230,20 @@ async function updateMe(req, res, next) {
 
   // 3. Copy the validated fields on and save. An empty body changes nothing
   //    and simply returns the account as it is.
-  Object.assign(user, result.data);
+  //
+  //    The switches are copied ONE BY ONE rather than as a whole object: sending
+  //    { notificationPrefs: { offers: false } } must leave `alerts` as it was,
+  //    and replacing the whole object would wipe it. user.set() with a "dotted"
+  //    path changes just that one switch.
+  const { notificationPrefs, ...fields } = result.data;
+  Object.assign(user, fields);
+  if (notificationPrefs) {
+    for (const [setting, value] of Object.entries(notificationPrefs)) {
+      if (value !== undefined) {
+        user.set(`notificationPrefs.${setting}`, value);
+      }
+    }
+  }
   await user.save();
 
   res.json({ user: publicUser(user) });

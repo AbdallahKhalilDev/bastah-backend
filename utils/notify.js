@@ -9,6 +9,31 @@ const { EVENT_TYPES } = require("./notificationEvents");
 // that person, so it's still written; it's there if the account is re-opened.
 const SKIP_SUSPENDED = ["announcement", "offer"];
 
+// The two families a person can switch off on their profile, and the name of
+// the switch for each (User.notificationPrefs). Orders, announcements and
+// account notices aren't here: they can't be switched off.
+const MUTE_SETTINGS = { offer: "offers", alert: "alerts" };
+
+// The conditions an account must meet to receive this family, as a MongoDB
+// filter. Empty {} = no conditions: everyone named gets it.
+//
+// Both checks use `$ne` ("not equal") rather than asking for the good value,
+// because older accounts have nothing stored: no status (made before suspending
+// existed) and no notificationPrefs (made before muting existed). `$ne` lets
+// those through as "active" and "switched on", which is what they are.
+function recipientConditions(type) {
+  const conditions = {};
+  if (SKIP_SUSPENDED.includes(type)) {
+    conditions.status = { $ne: "suspended" };
+  }
+  if (MUTE_SETTINGS[type]) {
+    // e.g. { "notificationPrefs.offers": { $ne: false } }: a dotted path looks
+    // INSIDE the notificationPrefs object.
+    conditions[`notificationPrefs.${MUTE_SETTINGS[type]}`] = { $ne: false };
+  }
+  return conditions;
+}
+
 // sendNotifications() does the actual work of writing notifications.
 //
 //   recipients     user ids (ObjectIds or strings) who should be told
@@ -49,14 +74,12 @@ async function sendNotifications({
     (id) => id !== actor
   );
 
-  // Broadcasts: keep only accounts that aren't suspended. `$ne` ("not equal")
-  // rather than `status: "active"`, because accounts made before suspending
-  // existed have no status stored at all, and they count as active.
-  if (ids.length > 0 && SKIP_SUSPENDED.includes(type)) {
-    const allowed = await User.find({
-      _id: { $in: ids },
-      status: { $ne: "suspended" },
-    }).select("_id");
+  // Keep only the people who may receive this family: not suspended (for
+  // broadcasts), and not switched off (for offers and alerts). ONE query asks
+  // the database "which of these ids meet the conditions?".
+  const conditions = recipientConditions(type);
+  if (ids.length > 0 && Object.keys(conditions).length > 0) {
+    const allowed = await User.find({ _id: { $in: ids }, ...conditions }).select("_id");
     ids = allowed.map((u) => String(u._id));
   }
 

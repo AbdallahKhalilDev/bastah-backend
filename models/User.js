@@ -73,6 +73,29 @@ const userSchema = new mongoose.Schema(
       ref: "User",
       default: null,
     },
+
+    // --- Notification settings (the person's own choice) --------------------
+    // Two on/off switches, set from the profile page (PATCH /api/auth/me).
+    //   offers = shops' offers           alerts = price drops, back in stock,
+    //                                             new reviews on my shop
+    // Orders, announcements and account notices can't be switched off: they're
+    // about the person's own orders and business. notify() (utils/notify.js)
+    // reads these before writing an offer or an alert.
+    //
+    // Both start ON. Accounts created before this field existed have nothing
+    // stored; the defaults fill in "on" when they're loaded (the same as
+    // tokenVersion and status), and notify() treats "nothing stored" as on too.
+    notificationPrefs: {
+      type: new mongoose.Schema(
+        {
+          offers: { type: Boolean, default: true },
+          alerts: { type: Boolean, default: true },
+        },
+        // Part of the user, never addressed on its own: no _id.
+        { _id: false }
+      ),
+      default: () => ({}),
+    },
   },
   {
     // Mongoose auto-adds and maintains `createdAt` and `updatedAt` timestamps.
