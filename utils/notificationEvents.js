@@ -33,6 +33,15 @@ const EVENT_TYPES = {
   back_in_stock: "alert", // → customers with that item in their cart
   new_review: "alert", // → the shop's owner
   announcement: "announcement", // → everyone an admin chose (never admins)
+
+  // Slice 15.3: account notices. An admin changed something a seller owns.
+  // These can't be muted: they're about the seller's own business.
+  shop_locked: "account", // → the shop's owner, with the admin's reason
+  shop_unlocked: "account",
+  shop_verified: "account",
+  shop_unverified: "account",
+  product_hidden: "account", // → the product's creator + every seller who lists it
+  product_shown: "account",
 };
 
 // Just the event names, for the model's enum.

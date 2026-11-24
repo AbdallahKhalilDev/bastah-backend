@@ -16,6 +16,10 @@ const parseBooleanQuery = require("../utils/booleanQuery");
 const escapeRegex = require("../utils/escapeRegex");
 const { ZONE_POPULATE } = require("../utils/shopRules");
 const { lockShop, unlockShop } = require("../utils/shopLocks");
+const {
+  notifyShopLockChanged,
+  notifyShopVerifiedChanged,
+} = require("../utils/accountNotifications");
 
 // What an admin sees about a shop's OWNER. Much more than the public's
 // "name only": an admin may need to phone the seller, or see that they're
@@ -119,8 +123,15 @@ async function setShopVerified(req, res, next) {
     return next({ status: 404, message: "Shop not found" });
   }
 
+  // Remember the badge as it was, so we only tell the seller about a real change
+  // (sending the same value twice is allowed, and changes nothing).
+  const wasVerified = shop.isVerified === true;
   shop.isVerified = result.data.isVerified;
   await shop.save();
+
+  if (wasVerified !== shop.isVerified) {
+    await notifyShopVerifiedChanged(shop, req.user.id);
+  }
 
   // Reload with the same links as the list, so the dashboard can swap the row.
   const populated = await populateForAdmin(Shop.findById(shop._id));
@@ -173,6 +184,10 @@ async function setShopLock(req, res, next) {
     unlockShop(shop);
   }
   await shop.save();
+
+  // Tell the seller. Always a real change here: "already locked" and "not
+  // locked" were answered with a 409 above.
+  await notifyShopLockChanged(shop, req.user.id);
 
   const populated = await populateForAdmin(Shop.findById(shop._id));
   res.json({ shop: populated });

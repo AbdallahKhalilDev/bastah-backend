@@ -4792,6 +4792,111 @@ async function main() {
     }
     check("sendNotifications (used by announcements) DOES report errors", threw);
 
+    // ============ Notifications: account notices for sellers (Step 15.3) ============
+    const sSellerA = await User.create({ name: "Notice Seller A", email: "nsa@test.com", passwordHash: "x", role: "seller" });
+    const sSellerB = await User.create({ name: "Notice Seller B", email: "nsb@test.com", passwordHash: "x", role: "seller" });
+    const sSellerC = await User.create({ name: "Notice Seller C", email: "nsc@test.com", passwordHash: "x", role: "seller" });
+    const sSellerD = await User.create({ name: "Notice Seller D", email: "nsd@test.com", passwordHash: "x", role: "seller" });
+    const sSellerAToken = tokenFor(sSellerA);
+    const sSellerBToken = tokenFor(sSellerB);
+    const sSellerCToken = tokenFor(sSellerC);
+
+    // Seller A has TWO shops, both selling the same product (which A created).
+    const sShopA1 = await Shop.create({ owner: sSellerA._id, name: "Notice Shop A1", phone: "71" });
+    const sShopA2 = await Shop.create({ owner: sSellerA._id, name: "Notice Shop A2", phone: "72" });
+    const sShopB = await Shop.create({ owner: sSellerB._id, name: "Notice Shop B", phone: "73" });
+    const sShopD = await Shop.create({ owner: sSellerD._id, name: "Notice Shop D", phone: "74" });
+    const sProduct = await Product.create({ name: "Notice Flour", nameAr: "طحين", category: category._id, createdBy: sSellerA._id });
+    await Listing.create({ shop: sShopA1._id, product: sProduct._id, price: 5 });
+    await Listing.create({ shop: sShopA2._id, product: sProduct._id, price: 6 });
+    await Listing.create({ shop: sShopB._id, product: sProduct._id, price: 7 });
+
+    const notices = (token, query = "") => inbox(token, "?type=account" + query);
+    const adminNotices = () => Notification.countDocuments({ recipient: admin._id, type: "account" });
+
+    console.log("\nAccount notices: shop locked / unlocked");
+
+    r = await req("PATCH", `/api/admin/shops/${sShopA1._id}/lock`, { token: adminToken, body: { locked: true, reason: "missing licence" } });
+    check("an admin locks a shop → 200", r.status === 200);
+    r = await notices(sSellerAToken);
+    let notice = r.body?.notifications?.[0];
+    check("the owner gets shop_locked (type account)", r.body?.total === 1 && notice?.event === "shop_locked" && notice?.type === "account");
+    check("...with the admin's reason, in both languages", notice?.body?.includes("Reason: missing licence") && notice?.bodyAr?.includes("السبب: missing licence"));
+    check("...linking the shop", notice?.link?.shop === String(sShopA1._id));
+
+    r = await req("PATCH", `/api/admin/shops/${sShopA1._id}/lock`, { token: adminToken, body: { locked: true, reason: "again" } });
+    check("locking it again → 409, and no second notice", r.status === 409 && (await notices(sSellerAToken)).body?.total === 1);
+
+    await req("PATCH", `/api/admin/shops/${sShopA1._id}/lock`, { token: adminToken, body: { locked: false } });
+    r = await notices(sSellerAToken);
+    check("unlock → shop_unlocked, saying it's open again", r.body?.total === 2 && r.body.notifications[0].event === "shop_unlocked" && r.body.notifications[0].body === "An admin reopened Notice Shop A1. Customers can see it again.");
+
+    // A shop the seller had closed themselves goes back to CLOSED when unlocked,
+    // and the notice must say so.
+    await Shop.updateOne({ _id: sShopA2._id }, { isActive: false });
+    await req("PATCH", `/api/admin/shops/${sShopA2._id}/lock`, { token: adminToken, body: { locked: true, reason: "check" } });
+    await req("PATCH", `/api/admin/shops/${sShopA2._id}/lock`, { token: adminToken, body: { locked: false } });
+    r = await notices(sSellerAToken);
+    check("unlocking a shop the seller had closed → 'still closed' text", r.body?.notifications?.[0]?.body === "An admin unlocked Notice Shop A2. It's still closed: you can open it again yourself.");
+    await Shop.updateOne({ _id: sShopA2._id }, { isActive: true });
+
+    console.log("\nAccount notices: the verified badge");
+
+    r = await req("PATCH", `/api/admin/shops/${sShopB._id}/verify`, { token: adminToken, body: { isVerified: true } });
+    r = await notices(sSellerBToken);
+    check("verify → the owner gets shop_verified", r.body?.total === 1 && r.body.notifications[0].event === "shop_verified" && r.body.notifications[0].body === "Notice Shop B is now verified. Customers will see the verified badge.");
+    r = await req("PATCH", `/api/admin/shops/${sShopB._id}/verify`, { token: adminToken, body: { isVerified: true } });
+    check("verify again (no change) → 200, no second notice", r.status === 200 && (await notices(sSellerBToken)).body?.total === 1);
+    await req("PATCH", `/api/admin/shops/${sShopB._id}/verify`, { token: adminToken, body: { isVerified: false } });
+    r = await notices(sSellerBToken);
+    check("remove the badge → shop_unverified", r.body?.total === 2 && r.body.notifications[0].event === "shop_unverified");
+    await req("PATCH", `/api/admin/shops/${sShopB._id}/verify`, { token: adminToken, body: { isVerified: false } });
+    check("remove it again (no change) → no notice", (await notices(sSellerBToken)).body?.total === 2);
+
+    console.log("\nAccount notices: product hidden / shown");
+
+    const productNotices = async (token, event) => (await notices(token)).body?.notifications?.filter((n) => n.event === event).length;
+
+    r = await req("PATCH", `/api/admin/products/${sProduct._id}/active`, { token: adminToken, body: { isActive: false } });
+    check("an admin hides a product → 200", r.status === 200);
+    check("seller A (created it AND lists it in two shops) gets exactly ONE product_hidden", (await productNotices(sSellerAToken, "product_hidden")) === 1);
+    check("seller B (lists it) gets one too", (await productNotices(sSellerBToken, "product_hidden")) === 1);
+    notice = (await notices(sSellerBToken)).body?.notifications?.[0];
+    check("...linking the product, with the Arabic name in the Arabic text", notice?.link?.product === String(sProduct._id) && notice?.bodyAr?.includes("طحين"));
+
+    await req("PATCH", `/api/admin/products/${sProduct._id}/active`, { token: adminToken, body: { isActive: false } });
+    check("hide it again (no change) → no second notice", (await productNotices(sSellerAToken, "product_hidden")) === 1 && (await productNotices(sSellerBToken, "product_hidden")) === 1);
+
+    await req("PATCH", `/api/admin/products/${sProduct._id}/active`, { token: adminToken, body: { isActive: true } });
+    check("show it again → product_shown for both", (await productNotices(sSellerAToken, "product_shown")) === 1 && (await productNotices(sSellerBToken, "product_shown")) === 1);
+
+    // A product an ADMIN created, listed only by seller B: the admin creator
+    // isn't a seller, so only B is told.
+    const sAdminProduct = await Product.create({ name: "Notice Admin Salt", nameAr: "ملح", category: category._id, createdBy: admin._id });
+    await Listing.create({ shop: sShopB._id, product: sAdminProduct._id, price: 2 });
+    await req("PATCH", `/api/admin/products/${sAdminProduct._id}/active`, { token: adminToken, body: { isActive: false } });
+    check("admin-created product: the seller who lists it is told", (await productNotices(sSellerBToken, "product_hidden")) === 2);
+    check("...seller A (doesn't list it) isn't", (await productNotices(sSellerAToken, "product_hidden")) === 1);
+
+    // A product its creator added but nobody lists yet: the creator is still told.
+    const sLonely = await Product.create({ name: "Notice Lonely", nameAr: "وحيد", category: category._id, createdBy: sSellerC._id });
+    await req("PATCH", `/api/admin/products/${sLonely._id}/active`, { token: adminToken, body: { isActive: false } });
+    check("a product nobody lists → its creator is told", (await productNotices(sSellerCToken, "product_hidden")) === 1);
+
+    // An old product: no creator stored, nobody lists it. Nobody to tell, no crash.
+    const sOrphan = await Product.create({ name: "Notice Orphan", nameAr: "يتيم", category: category._id });
+    r = await req("PATCH", `/api/admin/products/${sOrphan._id}/active`, { token: adminToken, body: { isActive: false } });
+    check("no creator and no listings → still 200", r.status === 200);
+
+    check("the admin who did all this gets no account notices", (await adminNotices()) === 0);
+
+    console.log("\nSuspending a seller sends no shop notices");
+    r = await req("PATCH", `/api/admin/users/${sSellerD._id}/status`, { token: adminToken, body: { status: "suspended", reason: "notice test" } });
+    check("suspending a seller locks their shop", r.status === 200 && r.body?.shopsLocked === 1);
+    check("...but sends them no shop_locked notice", (await Notification.countDocuments({ recipient: sSellerD._id })) === 0);
+    r = await req("PATCH", `/api/admin/users/${sSellerD._id}/status`, { token: adminToken, body: { status: "active" } });
+    check("switching them back on unlocks it, again with no notice", r.status === 200 && r.body?.shopsUnlocked === 1 && (await Notification.countDocuments({ recipient: sSellerD._id })) === 0);
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

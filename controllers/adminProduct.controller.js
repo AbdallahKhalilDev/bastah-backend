@@ -14,6 +14,7 @@ const parsePagination = require("../utils/pagination");
 const parseBooleanQuery = require("../utils/booleanQuery");
 const escapeRegex = require("../utils/escapeRegex");
 const { VISIBLE_PRODUCT } = require("../utils/productRules");
+const { notifyProductVisibilityChanged } = require("../utils/accountNotifications");
 
 // An explicit set, like featuring or verifying: { "isActive": false } hides,
 // { "isActive": true } shows again. Sending the current value twice is fine.
@@ -117,13 +118,25 @@ async function setProductActive(req, res, next) {
     return next({ status: 400, message: result.error.issues[0].message });
   }
 
-  const product = await Product.findById(req.params.id);
+  // "+createdBy": the schema hides who created a product, but the notice below
+  // goes to them, so we ask for it here.
+  const product = await Product.findById(req.params.id).select("+createdBy");
   if (!product) {
     return next({ status: 404, message: "Product not found" });
   }
 
+  // Remember whether customers could see it before. A product saved before
+  // hiding existed has no isActive stored, and counts as visible: the same
+  // `!== false` rule as VISIBLE_PRODUCT.
+  const wasVisible = product.isActive !== false;
   product.isActive = result.data.isActive;
   await product.save();
+
+  // Tell the sellers involved, but only about a real change: hiding an
+  // already-hidden product is allowed and changes nothing.
+  if (wasVisible !== product.isActive) {
+    await notifyProductVisibilityChanged(product, req.user.id);
+  }
 
   const populated = await populateForAdmin(Product.findById(product._id));
   res.json({ product: populated });

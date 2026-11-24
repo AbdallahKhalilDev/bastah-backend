@@ -161,6 +161,73 @@ function newReview(shopName, rating) {
   };
 }
 
+// --- ACCOUNT NOTICES: an admin changed something a SELLER owns -------------
+
+function shopLocked(shopName, reason) {
+  return {
+    title: "Shop closed by an admin",
+    titleAr: "أغلق المشرف متجرك",
+    body: `An admin closed ${shopName}. Reason: ${reason}. Customers can't see it until an admin opens it again.`,
+    bodyAr: `أغلق المشرف متجر ${shopName}. السبب: ${reason}. لن يظهر للزبائن حتى يعيد المشرف فتحه.`,
+  };
+}
+
+// Unlocking puts a shop back the way it was BEFORE the lock (utils/shopLocks.js):
+// open if it was open, closed if the seller had closed it themselves. So there
+// are two texts, and `isOpen` says which one is true now.
+function shopUnlocked(shopName, isOpen) {
+  if (isOpen) {
+    return {
+      title: "Shop open again",
+      titleAr: "أعيد فتح متجرك",
+      body: `An admin reopened ${shopName}. Customers can see it again.`,
+      bodyAr: `أعاد المشرف فتح ${shopName}، وأصبح ظاهراً للزبائن من جديد.`,
+    };
+  }
+  return {
+    title: "Shop unlocked",
+    titleAr: "ألغي قفل متجرك",
+    body: `An admin unlocked ${shopName}. It's still closed: you can open it again yourself.`,
+    bodyAr: `ألغى المشرف قفل ${shopName}. المتجر ما زال مغلقاً، ويمكنك فتحه بنفسك.`,
+  };
+}
+
+function shopVerified(shopName) {
+  return {
+    title: "Shop verified",
+    titleAr: "تم توثيق متجرك",
+    body: `${shopName} is now verified. Customers will see the verified badge.`,
+    bodyAr: `أصبح ${shopName} موثّقاً، وستظهر شارة التوثيق للزبائن.`,
+  };
+}
+
+function shopUnverified(shopName) {
+  return {
+    title: "Verified badge removed",
+    titleAr: "أزيلت شارة التوثيق",
+    body: `An admin removed the verified badge from ${shopName}.`,
+    bodyAr: `أزال المشرف شارة التوثيق عن ${shopName}.`,
+  };
+}
+
+function productHidden(product) {
+  return {
+    title: "Product hidden",
+    titleAr: "تم إخفاء منتج",
+    body: `An admin hid "${product.name}". Customers can't see it or order it until it's shown again.`,
+    bodyAr: `أخفى المشرف المنتج "${product.nameAr}". لن يتمكن الزبائن من رؤيته أو طلبه حتى يُعرض من جديد.`,
+  };
+}
+
+function productShown(product) {
+  return {
+    title: "Product visible again",
+    titleAr: "عاد المنتج للظهور",
+    body: `"${product.name}" is visible to customers again.`,
+    bodyAr: `أصبح المنتج "${product.nameAr}" ظاهراً للزبائن من جديد.`,
+  };
+}
+
 module.exports = {
   orderPlaced,
   orderStatusForCustomer,
@@ -168,4 +235,10 @@ module.exports = {
   priceDrop,
   backInStock,
   newReview,
+  shopLocked,
+  shopUnlocked,
+  shopVerified,
+  shopUnverified,
+  productHidden,
+  productShown,
 };
