@@ -24,6 +24,11 @@ const {
 const { categories, areas } = require("../controllers/adminLookup.controller");
 const { getSiteStats, listAllReviews } = require("../controllers/adminOverview.controller");
 const { sendAnnouncement } = require("../controllers/adminAnnouncement.controller");
+const {
+  createOffer,
+  updateOffer,
+  listDashboardOffers,
+} = require("../controllers/offer.controller");
 
 const router = express.Router();
 
@@ -79,5 +84,11 @@ router.get("/reviews", asyncHandler(listAllReviews));
 // Notifications (slice 15.2): one message to the inbox of all customers, all
 // sellers, or both (never admins; suspended accounts are skipped).
 router.post("/announcements", asyncHandler(sendAnnouncement));
+
+// Offers (slice 15.4): any open shop, no daily limit, edit or switch off any
+// offer. The same three functions as /api/seller/offers.
+router.get("/offers", asyncHandler(listDashboardOffers)); // every offer; ?shop=
+router.post("/offers", asyncHandler(createOffer));
+router.patch("/offers/:id", asyncHandler(updateOffer));
 
 module.exports = router;

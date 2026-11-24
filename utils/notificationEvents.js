@@ -42,6 +42,9 @@ const EVENT_TYPES = {
   shop_unverified: "account",
   product_hidden: "account", // → the product's creator + every seller who lists it
   product_shown: "account",
+
+  // Slice 15.4: offers.
+  offer: "offer", // → the shop's customers (anyone with a non-cancelled order there)
 };
 
 // Just the event names, for the model's enum.

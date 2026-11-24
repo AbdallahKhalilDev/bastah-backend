@@ -10,6 +10,11 @@ const {
 } = require("../controllers/seller.controller");
 // The item list is shared with the admin dashboard (GET /api/admin/listings).
 const { listDashboardListings } = require("../controllers/listing.controller");
+const {
+  createOffer,
+  updateOffer,
+  listDashboardOffers,
+} = require("../controllers/offer.controller");
 
 const router = express.Router();
 
@@ -26,5 +31,10 @@ router.get("/listings", asyncHandler(listDashboardListings)); // my items, pagin
 router.post("/listings/confirm", asyncHandler(confirmPrices)); // "these prices are still right"
 router.get("/stats", asyncHandler(getMyStats)); // the number cards; ?shop= for one shop
 router.get("/products", asyncHandler(listMyProducts)); // products I added, each with canEdit
+
+// Offers (slice 15.4). The same three functions as /api/admin/offers.
+router.get("/offers", asyncHandler(listDashboardOffers)); // my shops' offers; ?shop=
+router.post("/offers", asyncHandler(createOffer)); // one per shop per day; notifies its customers
+router.patch("/offers/:id", asyncHandler(updateOffer)); // only offers I posted
 
 module.exports = router;

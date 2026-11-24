@@ -4897,6 +4897,221 @@ async function main() {
     r = await req("PATCH", `/api/admin/users/${sSellerD._id}/status`, { token: adminToken, body: { status: "active" } });
     check("switching them back on unlocks it, again with no notice", r.status === 200 && r.body?.shopsUnlocked === 1 && (await Notification.countDocuments({ recipient: sSellerD._id })) === 0);
 
+    // ================= Offers (Step 15.4) =================
+    const Offer = require("../models/Offer");
+    const oSeller = await User.create({ name: "Offer Seller", email: "oseller@test.com", passwordHash: "x", role: "seller" });
+    const oOtherSeller = await User.create({ name: "Offer Other Seller", email: "oother@test.com", passwordHash: "x", role: "seller" });
+    const oSellerToken = tokenFor(oSeller);
+    const oShop1 = await Shop.create({ owner: oSeller._id, name: "Offer Shop 1", phone: "81" });
+    const oShop2 = await Shop.create({ owner: oSeller._id, name: "Offer Shop 2", phone: "82" });
+    const oShopClosed = await Shop.create({ owner: oSeller._id, name: "Offer Shop Closed", phone: "83", isActive: false });
+    const oShopLocked = await Shop.create({ owner: oSeller._id, name: "Offer Shop Locked", phone: "84" });
+    const oOtherShop = await Shop.create({ owner: oOtherSeller._id, name: "Offer Other Shop", phone: "85" });
+    await req("PATCH", `/api/admin/shops/${oShopLocked._id}/lock`, { token: adminToken, body: { locked: true, reason: "offer test" } });
+
+    const oRice = await Product.create({ name: "Offer Rice", nameAr: "أرز العرض", category: category._id });
+    const oUnsold = await Product.create({ name: "Offer Unsold", nameAr: "غير مباع", category: category._id });
+    const oHidden = await Product.create({ name: "Offer Hidden", nameAr: "مخفي", category: category._id, isActive: false });
+    const oRiceListing = await Listing.create({ shop: oShop1._id, product: oRice._id, price: 5 });
+    await Listing.create({ shop: oShop1._id, product: oHidden._id, price: 5 });
+
+    // The shop's customers, with orders in different states.
+    const makeCustomer = (name, extra = {}) =>
+      User.create({ name, email: `${name.toLowerCase().replace(/ /g, ".")}@test.com`, passwordHash: "x", role: "customer", ...extra });
+    const makeOfferOrder = (who, status) =>
+      Order.create({
+        customer: who._id,
+        shop: oShop1._id,
+        items: [{ listing: oRiceListing._id, product: oRice._id, productName: "Offer Rice", productNameAr: "أرز العرض", priceAtOrder: 5, quantity: 1 }],
+        subtotal: 5,
+        total: 5,
+        contactPhone: "0599",
+        status,
+      });
+    const oPending = await makeCustomer("Offer Pending");
+    const oCompleted = await makeCustomer("Offer Completed");
+    const oRepeat = await makeCustomer("Offer Repeat");
+    const oCancelledOnly = await makeCustomer("Offer Cancelled Only");
+    const oNever = await makeCustomer("Offer Never");
+    const oSuspended = await makeCustomer("Offer Suspended", { status: "suspended" });
+    await makeOfferOrder(oPending, "pending");
+    await makeOfferOrder(oCompleted, "completed");
+    await makeOfferOrder(oRepeat, "pending");
+    await makeOfferOrder(oRepeat, "completed");
+    await makeOfferOrder(oRepeat, "accepted");
+    await makeOfferOrder(oCancelledOnly, "cancelled");
+    await makeOfferOrder(oSuspended, "pending");
+    const offerCount = (who) => Notification.countDocuments({ recipient: who._id, type: "offer" });
+
+    const inAWeek = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const offerBody = (extra = {}) => ({
+      shop: String(oShop1._id),
+      title: "20% off rice",
+      titleAr: "خصم 20% على الأرز",
+      body: "This week only.",
+      bodyAr: "هذا الأسبوع فقط.",
+      endsAt: inAWeek,
+      ...extra,
+    });
+    const sellerPost = (body) => req("POST", "/api/seller/offers", { token: oSellerToken, body });
+    const adminPost = (body) => req("POST", "/api/admin/offers", { token: adminToken, body });
+
+    console.log("\nPOST /api/seller/offers (who may post)");
+
+    r = await req("POST", "/api/seller/offers", { body: offerBody() });
+    check("no token → 401", r.status === 401);
+    r = await req("POST", "/api/seller/offers", { token: customerToken, body: offerBody() });
+    check("a customer → 403", r.status === 403);
+    r = await req("POST", "/api/seller/offers", { token: adminToken, body: offerBody() });
+    check("an admin on the SELLER route → 403 (admins use /api/admin/offers)", r.status === 403);
+    r = await req("POST", "/api/admin/offers", { token: oSellerToken, body: offerBody() });
+    check("a seller on the ADMIN route → 403", r.status === 403);
+
+    console.log("\nPOST /api/seller/offers (checks)");
+
+    r = await sellerPost({});
+    check("nothing sent → 400 'Shop is required'", r.status === 400 && r.body?.error === "Shop is required");
+    r = await sellerPost(offerBody({ shop: "abc" }));
+    check("a malformed shop id → 400", r.status === 400 && r.body?.error === "Invalid shop id");
+    r = await sellerPost(offerBody({ shop: FAKE_ID }));
+    check("an unknown shop → 400 'Shop not found'", r.status === 400 && r.body?.error === "Shop not found");
+    r = await sellerPost(offerBody({ shop: String(oOtherShop._id) }));
+    check("someone else's shop → 403", r.status === 403);
+    r = await sellerPost(offerBody({ shop: String(oShopClosed._id) }));
+    check("my closed shop → 409", r.status === 409 && r.body?.error === "Offer Shop Closed is closed, so it can't post offers");
+    r = await sellerPost(offerBody({ shop: String(oShopLocked._id) }));
+    check("my LOCKED shop → 403 shop_locked, with the admin's reason", r.status === 403 && r.body?.code === "shop_locked" && r.body?.error?.includes("offer test"));
+    r = await sellerPost(offerBody({ titleAr: undefined }));
+    check("no Arabic title → 400", r.status === 400 && r.body?.error === "Arabic title is required");
+    r = await sellerPost(offerBody({ endsAt: undefined }));
+    check("no end date → 400 'End date is required'", r.status === 400 && r.body?.error === "End date is required");
+    r = await sellerPost(offerBody({ endsAt: "banana" }));
+    check("an end date that isn't a date → 400", r.status === 400 && r.body?.error === "End date must be a valid date");
+    r = await sellerPost(offerBody({ endsAt: "2020-01-01" }));
+    check("an end date in the past → 400", r.status === 400 && r.body?.error === "End date must be in the future");
+    r = await sellerPost(offerBody({ product: "abc" }));
+    check("a malformed product id → 400", r.status === 400 && r.body?.error === "Invalid product id");
+    r = await sellerPost(offerBody({ product: String(oUnsold._id) }));
+    check("a product this shop doesn't sell → 400", r.status === 400 && r.body?.error === "This shop does not sell that product");
+    r = await sellerPost(offerBody({ product: String(oHidden._id) }));
+    check("a product an admin has hidden → 400", r.status === 400 && r.body?.error === "Product not found");
+    check("none of those refused posts created an offer", (await Offer.countDocuments({})) === 0);
+
+    console.log("\nPOST /api/seller/offers (posting, and who is told)");
+
+    r = await sellerPost(offerBody({ product: String(oRice._id), title: "  20% off rice  " }));
+    const sellerOffer = r.body?.offer;
+    check("a seller posts an offer → 201", r.status === 201);
+    check("...switched on, about the product, posted by the seller (name + role)", sellerOffer?.isActive === true && sellerOffer?.product?.name === "Offer Rice" && sellerOffer?.createdBy?.name === "Offer Seller" && sellerOffer?.createdBy?.role === "seller");
+    check("...text trimmed, end date stored", sellerOffer?.title === "20% off rice" && sellerOffer?.endsAt === inAWeek);
+    check("notified = 3 (pending, completed, the repeat customer once; not the suspended one)", r.body?.notified === 3);
+
+    r = await inbox(tokenFor(oPending), "?type=offer");
+    alert = r.body?.notifications?.[0];
+    check("a customer with a pending order gets it: event + type offer", r.body?.total === 1 && alert?.event === "offer" && alert?.type === "offer");
+    check("...the shop's name in front of the offer's own title, both languages", alert?.title === "Offer Shop 1: 20% off rice" && alert?.titleAr === "Offer Shop 1: خصم 20% على الأرز" && alert?.body === "This week only.");
+    check("...linking the offer, the shop and the product", alert?.link?.offer === sellerOffer?._id && alert?.link?.shop === String(oShop1._id) && alert?.link?.product === String(oRice._id));
+    check("a customer with a completed order gets it", (await offerCount(oCompleted)) === 1);
+    check("a customer with THREE orders gets it once", (await offerCount(oRepeat)) === 1);
+    check("a customer whose only order was cancelled doesn't", (await offerCount(oCancelledOnly)) === 0);
+    check("a customer who never ordered doesn't", (await offerCount(oNever)) === 0);
+    check("a suspended customer doesn't", (await offerCount(oSuspended)) === 0);
+
+    console.log("\nThe seller's limit: one offer per shop per day");
+
+    r = await sellerPost(offerBody());
+    check("a second offer for the same shop today → 429 offer_limit_reached", r.status === 429 && r.body?.code === "offer_limit_reached");
+    r = await req("PATCH", `/api/seller/offers/${sellerOffer?._id}`, { token: oSellerToken, body: { isActive: false } });
+    check("the seller switches their offer off → 200", r.status === 200 && r.body?.offer?.isActive === false);
+    r = await sellerPost(offerBody());
+    check("...and still can't post again today (switched-off ones count)", r.status === 429);
+    r = await sellerPost(offerBody({ shop: String(oShop2._id), title: "Shop 2 deal" }));
+    const sellerOffer2 = r.body?.offer;
+    check("one of my OTHER shops can still post today → 201", r.status === 201 && r.body?.notified === 0);
+    check("customers weren't told about the refused posts", (await offerCount(oPending)) === 1);
+
+    console.log("\nPATCH /api/seller/offers/:id");
+
+    r = await req("PATCH", `/api/seller/offers/${sellerOffer?._id}`, { token: oSellerToken, body: { isActive: true } });
+    check("a seller can't switch an offer back ON → 403", r.status === 403 && r.body?.error === "Only an admin can switch an offer back on");
+    r = await req("PATCH", `/api/admin/offers/${sellerOffer?._id}`, { token: adminToken, body: { isActive: true } });
+    check("an admin can → 200", r.status === 200 && r.body?.offer?.isActive === true);
+
+    r = await req("PATCH", `/api/seller/offers/${sellerOffer?._id}`, { token: oSellerToken, body: { title: "25% off rice", shop: String(oOtherShop._id) } });
+    check("the seller edits the title → 200", r.status === 200 && r.body?.offer?.title === "25% off rice");
+    check("...the shop can't be changed (stripped)", r.body?.offer?.shop?._id === String(oShop1._id));
+    check("...and editing re-sends nothing", (await offerCount(oPending)) === 1);
+    check("...the notification already sent keeps the old title", (await inbox(tokenFor(oPending), "?type=offer")).body?.notifications?.[0]?.title === "Offer Shop 1: 20% off rice");
+
+    r = await req("PATCH", `/api/seller/offers/${sellerOffer?._id}`, { token: oSellerToken, body: { endsAt: "2020-01-01" } });
+    check("an end date in the past → 400", r.status === 400);
+    r = await req("PATCH", "/api/seller/offers/abc", { token: oSellerToken, body: { title: "x" } });
+    check("a malformed id → 400", r.status === 400 && r.body?.error === "Invalid offer id");
+    r = await req("PATCH", `/api/seller/offers/${FAKE_ID}`, { token: oSellerToken, body: { title: "x" } });
+    check("an unknown offer → 404", r.status === 404);
+
+    console.log("\nPOST /api/admin/offers");
+
+    r = await adminPost(offerBody({ title: "Admin deal 1" }));
+    const adminOffer1 = r.body?.offer;
+    check("an admin posts for a seller's shop → 201, posted by an admin", r.status === 201 && adminOffer1?.createdBy?.role === "admin" && r.body?.notified === 3);
+    r = await adminPost(offerBody({ title: "Admin deal 2" }));
+    const adminOffer2 = r.body?.offer;
+    check("...and another the same day → 201 (no limit for admins)", r.status === 201);
+    check("each offer notifies the customers (3 offers so far)", (await offerCount(oPending)) === 3);
+    r = await adminPost(offerBody({ shop: String(oShopClosed._id) }));
+    check("an admin, closed shop → 409", r.status === 409);
+    r = await adminPost(offerBody({ shop: String(oShopLocked._id) }));
+    check("an admin, locked shop → 409 (not 403: unlock it first)", r.status === 409);
+
+    r = await req("PATCH", `/api/seller/offers/${adminOffer1?._id}`, { token: oSellerToken, body: { title: "mine now" } });
+    check("the seller can't edit an admin's offer on their shop → 403", r.status === 403 && r.body?.error === "You can only edit offers you posted");
+    r = await req("PATCH", `/api/admin/offers/${sellerOffer2?._id}`, { token: adminToken, body: { body: "Edited by an admin." } });
+    check("an admin edits a seller's offer → 200", r.status === 200 && r.body?.offer?.body === "Edited by an admin.");
+
+    console.log("\nGET /api/seller/offers and /api/admin/offers");
+
+    r = await req("GET", "/api/seller/offers", { token: oSellerToken });
+    check("the seller sees all their shops' offers, including the admin's (4)", r.status === 200 && r.body?.total === 4);
+    check("...newest first, with who posted each", r.body?.offers?.[0]?.title === "Admin deal 2" && r.body.offers.every((o) => o.createdBy?.role));
+    r = await req("GET", `/api/seller/offers?shop=${oShop2._id}`, { token: oSellerToken });
+    check("?shop= one of mine → that shop's offers", r.body?.total === 1);
+    r = await req("GET", `/api/seller/offers?shop=${oOtherShop._id}`, { token: oSellerToken });
+    check("?shop= someone else's → 403", r.status === 403);
+    r = await req("GET", `/api/admin/offers?shop=${oShop1._id}`, { token: adminToken });
+    check("an admin sees any shop's offers", r.status === 200 && r.body?.total === 3);
+
+    console.log("\nGET /api/offers and /api/shops/:shopId/offers (public)");
+
+    // One that has ended (posted straight into the database: the API refuses
+    // past dates) and one an admin switched off. Neither should show.
+    await Offer.create({ shop: oShop1._id, title: "Old deal", titleAr: "قديم", body: "x", bodyAr: "x", endsAt: new Date(Date.now() - 1000), createdBy: oSeller._id });
+    await req("PATCH", `/api/admin/offers/${adminOffer2?._id}`, { token: adminToken, body: { isActive: false } });
+
+    r = await req("GET", `/api/shops/${oShop1._id}/offers`);
+    check("a shop's page: only its current offers (not ended, not switched off)", r.status === 200 && r.body?.total === 2 && r.body.offers.every((o) => ["25% off rice", "Admin deal 1"].includes(o.title)));
+    check("...with the shop's public fields, the product, and NOT who posted it", r.body?.offers?.some((o) => o.product?.name === "Offer Rice") && r.body.offers.every((o) => o.shop?.name === "Offer Shop 1" && o.createdBy === undefined && o.shop?.owner === undefined));
+
+    r = await req("GET", "/api/offers");
+    check("all current offers, every open shop (3)", r.status === 200 && r.body?.total === 3);
+
+    await req("PATCH", `/api/admin/shops/${oShop2._id}/lock`, { token: adminToken, body: { locked: true, reason: "public list test" } });
+    check("a locked shop's offers disappear from the public list", (await req("GET", "/api/offers")).body?.total === 2);
+    r = await req("GET", `/api/shops/${oShop2._id}/offers`);
+    check("...and its own offers page → 404, like its page", r.status === 404);
+    await req("PATCH", `/api/admin/shops/${oShop2._id}/lock`, { token: adminToken, body: { locked: false } });
+
+    await req("PATCH", `/api/admin/products/${oRice._id}/active`, { token: adminToken, body: { isActive: false } });
+    r = await req("GET", `/api/shops/${oShop1._id}/offers`);
+    const riceOffer = r.body?.offers?.find((o) => o.title === "25% off rice");
+    check("product hidden after posting → the offer stays, product null", r.body?.total === 2 && riceOffer && riceOffer.product === null);
+    await req("PATCH", `/api/admin/products/${oRice._id}/active`, { token: adminToken, body: { isActive: true } });
+
+    r = await req("GET", "/api/shops/abc/offers");
+    check("a malformed shop id → 400", r.status === 400);
+    r = await req("GET", `/api/shops/${FAKE_ID}/offers`);
+    check("an unknown shop → 404", r.status === 404);
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

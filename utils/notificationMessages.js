@@ -228,7 +228,22 @@ function productShown(product) {
   };
 }
 
+// --- OFFERS --------------------------------------------------------------------
+
+// To a CUSTOMER of the shop: the offer in the shop's (or admin's) own words,
+// with the shop's name in front of the title so they know who it's from.
+// Copied once: editing the offer later doesn't change notifications already sent.
+function offerPosted(offer, shopName) {
+  return {
+    title: `${shopName}: ${offer.title}`,
+    titleAr: `${shopName}: ${offer.titleAr}`,
+    body: offer.body,
+    bodyAr: offer.bodyAr,
+  };
+}
+
 module.exports = {
+  offerPosted,
   orderPlaced,
   orderStatusForCustomer,
   orderStatusForSeller,
