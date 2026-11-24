@@ -20,6 +20,10 @@ const {
   resolveDeliveryFee,
 } = require("../utils/orderQueries");
 const { shopFilter } = require("../utils/sellerQueries");
+const {
+  notifyOrdersPlaced,
+  notifyOrderStatusChanged,
+} = require("../utils/orderNotifications");
 
 // --- Input validation -----------------------------------------------------
 // A WHITELIST for placing an order. Only these two keys are accepted.
@@ -277,6 +281,12 @@ async function createOrder(req, res, next) {
     await fresh.save();
   }
 
+  // 8b. Tell each shop's owner they have a new order. This comes AFTER the
+  //     orders and the cart are saved, and it never throws: a notification is a
+  //     side effect, so a problem writing one can't spoil a successful checkout.
+  //     `shopById` from step 5 already holds every shop with its owner.
+  await notifyOrdersPlaced(created, shopById, req.user.id);
+
   // 9. Return every order we just created, in the shared populated shape.
   //
   //    NOTE THE ARRAY. This is the one create endpoint in Bastah that returns a
@@ -445,6 +455,11 @@ async function updateOrderStatus(req, res, next) {
     order.cancelReason = data.cancelReason;
   }
   await order.save();
+
+  // 6b. Tell the other side of the order (never the person who just moved it).
+  //     Only reached when the move really happened: every refusal above
+  //     returned early, so a 400/403/409 never creates a notification.
+  await notifyOrderStatusChanged(order, actorRole, req.user.id);
 
   // 7. Return the same populated shape every other order endpoint returns.
   res.json({ order: await getPopulatedOrder(order._id) });

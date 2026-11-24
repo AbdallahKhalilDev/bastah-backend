@@ -103,7 +103,9 @@ async function main() {
   const Cart = require("../models/Cart");
   const Order = require("../models/Order");
   const Area = require("../models/Area");
+  const Notification = require("../models/Notification");
   await Promise.all([
+    Notification.init(),
     Listing.init(),
     Product.init(),
     Shop.init(),
@@ -4437,6 +4439,202 @@ async function main() {
     // Put things back.
     await req("PATCH", `/api/admin/shops/${dashClosedShop._id}/lock`, { token: adminToken, body: { locked: false } });
     await req("PATCH", `/api/admin/products/${jamId}/active`, { token: adminToken, body: { isActive: true } });
+
+    // ============ Notifications: inbox + order updates (Step 15.1) ============
+    // Fresh people, shops and products, so earlier sections (which also place
+    // and move orders, and so also create notifications) can't change the counts.
+    const nSellerA = await User.create({ name: "Notif Seller A", email: "nsellera@test.com", passwordHash: "x", role: "seller" });
+    const nSellerB = await User.create({ name: "Notif Seller B", email: "nsellerb@test.com", passwordHash: "x", role: "seller" });
+    const nCustomer = await User.create({ name: "Notif Customer", email: "ncustomer@test.com", passwordHash: "x", role: "customer" });
+    const nStranger = await User.create({ name: "Notif Stranger", email: "nstranger@test.com", passwordHash: "x", role: "customer" });
+    const nSellerAToken = tokenFor(nSellerA);
+    const nSellerBToken = tokenFor(nSellerB);
+    const nCustomerToken = tokenFor(nCustomer);
+    const nStrangerToken = tokenFor(nStranger);
+
+    const nShopA = await Shop.create({ owner: nSellerA._id, name: "Notif Shop A", phone: "51" });
+    const nShopB = await Shop.create({ owner: nSellerB._id, name: "Notif Shop B", phone: "52" });
+    const nRice = await Product.create({ name: "Notif Rice", nameAr: "أرز", category: category._id, unit: "kg" });
+    const nOil = await Product.create({ name: "Notif Oil", nameAr: "زيت", category: category._id, unit: "L" });
+    const nListingA = await Listing.create({ shop: nShopA._id, product: nRice._id, price: 12.5 });
+    const nListingB = await Listing.create({ shop: nShopB._id, product: nOil._id, price: 20 });
+
+    const inbox = (token, query = "") => req("GET", "/api/notifications" + query, { token });
+    const unreadCount = async (token) => (await req("GET", "/api/notifications/unread-count", { token })).body?.count;
+    const setStatus = (token, orderId, body) => req("PATCH", `/api/orders/${orderId}/status`, { token, body });
+
+    console.log("\nGET /api/notifications (an empty inbox)");
+
+    r = await inbox(nCustomerToken);
+    check("empty inbox → 200, no notifications, total 0", r.status === 200 && Array.isArray(r.body?.notifications) && r.body.notifications.length === 0 && r.body?.total === 0);
+    check("...with the usual page + limit", r.body?.page === 1 && r.body?.limit === 20);
+
+    r = await inbox(adminToken);
+    check("an admin has an inbox too → 200", r.status === 200 && r.body?.total === 0);
+
+    console.log("\nCheckout tells each shop's owner (order_placed)");
+
+    await req("POST", "/api/cart/items", { token: nCustomerToken, body: { listing: nListingA.id, quantity: 2 } });
+    await req("POST", "/api/cart/items", { token: nCustomerToken, body: { listing: nListingB.id, quantity: 1 } });
+    r = await req("POST", "/api/orders", { token: nCustomerToken, body: { contactPhone: "0599000111" } });
+    check("checkout across two shops → 201 with 2 orders", r.status === 201 && r.body?.orders?.length === 2);
+    const nOrderA = r.body?.orders?.find((o) => o.shop?.name === "Notif Shop A");
+    const nOrderB = r.body?.orders?.find((o) => o.shop?.name === "Notif Shop B");
+
+    r = await inbox(nSellerAToken);
+    const placedA = r.body?.notifications?.[0];
+    check("seller A gets exactly one notification", r.body?.total === 1);
+    check("...event order_placed, type order, unread", placedA?.event === "order_placed" && placedA?.type === "order" && placedA?.readAt === null);
+    check("...linking the order and the shop", placedA?.link?.order === nOrderA?._id && placedA?.link?.shop === String(nShopA._id));
+    check("...English text names the shop, the total and pickup", placedA?.title === "New order" && placedA?.body === "Notif Shop A: 1 item, total ₪25.00 (pickup).");
+    check("...and the Arabic text too", placedA?.titleAr === "طلب جديد" && placedA?.bodyAr?.includes("Notif Shop A") && placedA?.bodyAr?.includes("₪25.00"));
+
+    r = await inbox(nSellerBToken);
+    check("seller B gets their own order_placed, for their own order", r.body?.total === 1 && r.body.notifications[0].link?.order === nOrderB?._id);
+
+    r = await inbox(nCustomerToken);
+    check("the customer who checked out isn't told about their own action", r.body?.total === 0);
+
+    console.log("\nStatus changes tell the other side of the order");
+
+    r = await setStatus(nSellerAToken, nOrderA?._id, { status: "accepted" });
+    check("seller A accepts → 200", r.status === 200);
+    r = await inbox(nCustomerToken);
+    check("customer gets order_accepted", r.body?.total === 1 && r.body.notifications[0].event === "order_accepted");
+    check("...saying which shop accepted it", r.body?.notifications?.[0]?.body === "Notif Shop A accepted your order.");
+    check("seller A (who acted) gets nothing new", (await inbox(nSellerAToken)).body?.total === 1);
+
+    // Refused moves create nothing.
+    r = await setStatus(nCustomerToken, nOrderA?._id, { status: "cancelled" });
+    check("customer can't cancel an accepted order → 403", r.status === 403);
+    r = await setStatus(nStrangerToken, nOrderA?._id, { status: "ready" });
+    check("a stranger → 403", r.status === 403);
+    r = await setStatus(nSellerAToken, nOrderA?._id, { status: "delivering" });
+    check("delivering on a pickup order → 409", r.status === 409);
+    check("...none of those refused moves told anyone", (await inbox(nSellerAToken)).body?.total === 1 && (await inbox(nCustomerToken)).body?.total === 1);
+
+    r = await setStatus(nSellerAToken, nOrderA?._id, { status: "ready" });
+    r = await inbox(nCustomerToken);
+    check("ready on a pickup order → 'ready for pickup'", r.body?.notifications?.[0]?.event === "order_ready" && r.body.notifications[0].body === "Your order from Notif Shop A is ready for pickup.");
+
+    r = await setStatus(nCustomerToken, nOrderB?._id, { status: "cancelled", cancelReason: "changed my mind" });
+    check("customer cancels their pending order B → 200", r.status === 200);
+    r = await inbox(nSellerBToken);
+    const cancelledB = r.body?.notifications?.[0];
+    check("seller B gets order_cancelled", r.body?.total === 2 && cancelledB?.event === "order_cancelled");
+    check("...with the customer's reason, in both languages", cancelledB?.body?.includes("Reason: changed my mind") && cancelledB?.bodyAr?.includes("السبب: changed my mind"));
+    check("the customer who cancelled gets nothing new", (await inbox(nCustomerToken)).body?.total === 2);
+
+    r = await setStatus(adminToken, nOrderA?._id, { status: "completed" });
+    check("an admin completes order A → 200", r.status === 200);
+    r = await inbox(nCustomerToken);
+    check("the customer is told (order_completed)", r.body?.total === 3 && r.body.notifications[0].event === "order_completed");
+    r = await inbox(nSellerAToken);
+    check("the seller is told too, that an admin did it", r.body?.total === 2 && r.body.notifications[0].event === "order_completed" && r.body.notifications[0].body.startsWith("An admin marked an order at Notif Shop A"));
+    check("the admin gets nothing", (await inbox(adminToken)).body?.total === 0);
+
+    r = await setStatus(adminToken, nOrderA?._id, { status: "accepted" });
+    check("a completed order can't move → 409, and nobody is told", r.status === 409 && (await inbox(nCustomerToken)).body?.total === 3);
+
+    console.log("\nGET /api/notifications (filters and pages)");
+
+    r = await inbox(nCustomerToken);
+    check("newest first", r.body?.notifications?.map((n) => n.event).join(",") === "order_completed,order_ready,order_accepted");
+    check("only my own notifications", r.body?.notifications?.every((n) => n.recipient === String(nCustomer._id)));
+
+    r = await inbox(nCustomerToken, "?type=order");
+    check("?type=order → all 3", r.status === 200 && r.body?.total === 3);
+    r = await inbox(nCustomerToken, "?type=alert");
+    check("?type=alert (a real tab, empty for now) → 200, total 0", r.status === 200 && r.body?.total === 0);
+    r = await inbox(nCustomerToken, "?type=bogus");
+    check("?type=bogus → 400 Invalid type", r.status === 400 && r.body?.error === "Invalid type");
+
+    r = await inbox(nCustomerToken, "?unread=true");
+    check("?unread=true → all 3 are unread", r.body?.total === 3);
+    r = await inbox(nCustomerToken, "?unread=maybe");
+    check("?unread=maybe → 400", r.status === 400 && r.body?.error === "unread must be true or false");
+
+    const page1 = await inbox(nCustomerToken, "?limit=2");
+    const page2 = await inbox(nCustomerToken, "?limit=2&page=2");
+    check("?limit=2 → 2 of 3", page1.body?.notifications?.length === 2 && page1.body?.total === 3);
+    check("page 2 → the last one, no repeats", page2.body?.notifications?.length === 1 && !page1.body?.notifications?.some((n) => n._id === page2.body.notifications[0]._id));
+
+    console.log("\nGET /api/notifications/unread-count");
+    r = await req("GET", "/api/notifications/unread-count", { token: nCustomerToken });
+    check("→ 200 { count: 3 }", r.status === 200 && r.body?.count === 3);
+
+    console.log("\nPATCH /api/notifications/:id/read");
+    const newestId = (await inbox(nCustomerToken)).body?.notifications?.[0]?._id;
+
+    r = await req("PATCH", `/api/notifications/${newestId}/read`, { token: nCustomerToken });
+    const firstReadAt = r.body?.notification?.readAt;
+    check("mark one read → 200 with readAt set", r.status === 200 && !!firstReadAt);
+    check("...unread count drops to 2", (await unreadCount(nCustomerToken)) === 2);
+    check("...?unread=true → 2, ?unread=false → 1", (await inbox(nCustomerToken, "?unread=true")).body?.total === 2 && (await inbox(nCustomerToken, "?unread=false")).body?.total === 1);
+    check("...it's still in the inbox (reading doesn't delete)", (await inbox(nCustomerToken)).body?.total === 3);
+
+    r = await req("PATCH", `/api/notifications/${newestId}/read`, { token: nCustomerToken });
+    check("marking it again → 200, the original readAt is kept", r.status === 200 && r.body?.notification?.readAt === firstReadAt);
+
+    const sellerANotifId = (await inbox(nSellerAToken)).body?.notifications?.[0]?._id;
+    r = await req("PATCH", `/api/notifications/${sellerANotifId}/read`, { token: nCustomerToken });
+    check("someone else's notification → 404 (not 403)", r.status === 404 && r.body?.error === "Notification not found");
+    check("...and it stays unread for its owner", (await unreadCount(nSellerAToken)) === 2);
+    r = await req("PATCH", "/api/notifications/abc/read", { token: nCustomerToken });
+    check("a malformed id → 400", r.status === 400 && r.body?.error === "Invalid notification id");
+    r = await req("PATCH", `/api/notifications/${FAKE_ID}/read`, { token: nCustomerToken });
+    check("an unknown id → 404", r.status === 404);
+
+    console.log("\nPATCH /api/notifications/read-all");
+    r = await req("PATCH", "/api/notifications/read-all", { token: nCustomerToken });
+    check("→ 200 { updated: 2 }", r.status === 200 && r.body?.updated === 2);
+    check("...unread count is 0", (await unreadCount(nCustomerToken)) === 0);
+    r = await req("PATCH", "/api/notifications/read-all", { token: nCustomerToken });
+    check("again → { updated: 0 }", r.status === 200 && r.body?.updated === 0);
+    check("another user's notifications are untouched", (await unreadCount(nSellerAToken)) === 2);
+
+    console.log("\nDELETE /api/notifications/:id");
+    r = await req("DELETE", `/api/notifications/${newestId}`, { token: nCustomerToken });
+    check("delete one of mine → 200", r.status === 200 && r.body?.message === "Notification deleted");
+    check("...it's gone from my inbox", (await inbox(nCustomerToken)).body?.total === 2);
+    r = await req("DELETE", `/api/notifications/${newestId}`, { token: nCustomerToken });
+    check("deleting it again → 404", r.status === 404);
+    r = await req("DELETE", `/api/notifications/${sellerANotifId}`, { token: nCustomerToken });
+    check("deleting someone else's → 404, and they still have it", r.status === 404 && (await inbox(nSellerAToken)).body?.total === 2);
+    r = await req("DELETE", "/api/notifications/abc", { token: nCustomerToken });
+    check("a malformed id → 400", r.status === 400);
+
+    console.log("\nDELETE /api/notifications (delete all)");
+    r = await req("DELETE", "/api/notifications", { token: nSellerAToken });
+    check("→ 200 { deleted: 2 }", r.status === 200 && r.body?.deleted === 2);
+    check("...my inbox is empty and my unread count is 0", (await inbox(nSellerAToken)).body?.total === 0 && (await unreadCount(nSellerAToken)) === 0);
+    check("...other inboxes are untouched", (await inbox(nSellerBToken)).body?.total === 2 && (await inbox(nCustomerToken)).body?.total === 2);
+    r = await req("DELETE", "/api/notifications", { token: nSellerAToken });
+    check("an already-empty inbox → 200 { deleted: 0 }", r.status === 200 && r.body?.deleted === 0);
+
+    console.log("\n/api/notifications needs a login");
+    const noToken = await Promise.all([
+      req("GET", "/api/notifications"),
+      req("GET", "/api/notifications/unread-count"),
+      req("PATCH", "/api/notifications/read-all"),
+      req("PATCH", `/api/notifications/${FAKE_ID}/read`),
+      req("DELETE", `/api/notifications/${FAKE_ID}`),
+      req("DELETE", "/api/notifications"),
+    ]);
+    check("no token → 401 on all six routes", noToken.every((x) => x.status === 401));
+
+    console.log("\nnotify() never throws");
+    const notify = require("../utils/notify");
+    const goodMessage = { title: "t", titleAr: "t", body: "b", bodyAr: "b" };
+    let sent = await notify({ recipients: [nStranger._id], event: "not_a_real_event", message: goodMessage });
+    check("an unknown event → resolves to 0, no crash", sent === 0);
+    sent = await notify({ recipients: [nStranger._id], event: "order_accepted", message: { title: "only a title" } });
+    check("missing text → resolves to 0, no crash", sent === 0);
+    sent = await notify({ recipients: [nStranger._id, String(nStranger._id)], event: "order_accepted", message: goodMessage });
+    check("the same person twice → one notification", sent === 1);
+    sent = await notify({ recipients: [nStranger._id], event: "order_accepted", message: goodMessage, actorId: nStranger._id });
+    check("the person who acted is never told → 0", sent === 0);
+    check("...so the stranger has exactly the one", (await inbox(nStrangerToken)).body?.total === 1);
 
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
