@@ -491,21 +491,48 @@ async function updateOrderStatus(req, res, next) {
     return next({ status: 403, message: "Forbidden" });
   }
 
-  // 6. Make the move. cancelReason is only meaningful on a cancellation, so we
-  //    ignore it otherwise rather than letting it linger on a completed order.
-  order.status = data.status;
+  // 6. Make the move, but ONLY if the order is still in the status we checked.
+  //
+  //    Steps 2–5 read the order and checked the rule against its status at
+  //    that moment. If the seller taps "accept" while the customer taps
+  //    "cancel", both requests read "pending", and both moves are allowed from
+  //    pending. A plain save() would let both succeed, and whichever saved LAST
+  //    would win, so a "cancelled" order could end up "accepted".
+  //
+  //    findOneAndUpdate finds AND changes the order in one database step, and
+  //    the filter `status: order.status` only matches while the order is still
+  //    in the status we checked. The first request moves it; the second then
+  //    matches nothing, gets null back, and is refused without changing
+  //    anything. (Same idea as the cart claim in createOrder.)
+  //
+  //    cancelReason is only meaningful on a cancellation, so we ignore it
+  //    otherwise rather than letting it linger on a completed order.
+  const changes = { status: data.status };
   if (data.status === "cancelled" && data.cancelReason !== undefined) {
-    order.cancelReason = data.cancelReason;
+    changes.cancelReason = data.cancelReason;
   }
-  await order.save();
+  const updated = await Order.findOneAndUpdate(
+    { _id: order._id, status: order.status },
+    { $set: changes },
+    { new: true } // give back the order AFTER the change
+  );
+  if (!updated) {
+    // Someone else moved it a moment ago. Like the 409 above, it's the order's
+    // state that conflicts; the code tells the app to reload and look again.
+    return next({
+      status: 409,
+      code: "order_changed",
+      message: "This order was just changed by someone else. Refresh and try again.",
+    });
+  }
 
   // 6b. Tell the other side of the order (never the person who just moved it).
   //     Only reached when the move really happened: every refusal above
   //     returned early, so a 400/403/409 never creates a notification.
-  await notifyOrderStatusChanged(order, actorRole, req.user.id);
+  await notifyOrderStatusChanged(updated, actorRole, req.user.id);
 
   // 7. Return the same populated shape every other order endpoint returns.
-  res.json({ order: await getPopulatedOrder(order._id) });
+  res.json({ order: await getPopulatedOrder(updated._id) });
 }
 
 module.exports = {

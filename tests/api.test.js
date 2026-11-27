@@ -5238,6 +5238,42 @@ async function main() {
     r = await req("GET", "/api/cart", { token: raceCustomerToken });
     check("...and the cart is empty", r.body?.cart?.items?.length === 0);
 
+    // ============ Order status: two people move it at the same moment ============
+    // The seller taps "accept" while the customer taps "cancel". Both read
+    // "pending", and both moves are allowed from pending. Only the FIRST may
+    // happen; the other must be refused, not quietly overwrite it.
+    console.log("\nOrder status: several changes at the same moment");
+
+    const raceSellerToken = tokenFor(raceSeller);
+    const raceLine = { listing: raceListing._id, product: raceProduct._id, productName: "Race Rice", productNameAr: "أرز", priceAtOrder: 12, quantity: 1 };
+    const statusRaceOrder = await Order.create({ customer: raceCustomer._id, shop: raceShop._id, items: [raceLine], subtotal: 12, total: 12, contactPhone: "0599", status: "pending" });
+    const moveRaceOrder = (token, status) =>
+      req("PATCH", `/api/orders/${statusRaceOrder._id}/status`, { token, body: { status } });
+
+    const moves = await Promise.all([
+      moveRaceOrder(raceSellerToken, "accepted"),
+      moveRaceOrder(raceCustomerToken, "cancelled"),
+      moveRaceOrder(raceSellerToken, "accepted"),
+      moveRaceOrder(raceCustomerToken, "cancelled"),
+      moveRaceOrder(raceSellerToken, "accepted"),
+      moveRaceOrder(raceCustomerToken, "cancelled"),
+    ]);
+    const moveWins = moves.filter((x) => x.status === 200);
+    check("6 moves at once → exactly one 200", moveWins.length === 1);
+    check(
+      "...the others are refused (409 or 403), none crashes",
+      moves.filter((x) => x.status === 409 || x.status === 403).length === 5
+    );
+    const storedRaceOrder = await Order.findById(statusRaceOrder._id);
+    check(
+      "...the stored status is the winner's, not a later overwrite",
+      moveWins.length === 1 && storedRaceOrder.status === moveWins[0].body?.order?.status
+    );
+    check(
+      "...only ONE status notification was sent",
+      (await Notification.countDocuments({ "link.order": statusRaceOrder._id })) === 1
+    );
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.
