@@ -2387,6 +2387,7 @@ async function main() {
       body: { contactPhone: "0599" },
     });
     check("no cart at all → 400 Cart is empty", r.status === 400 && r.body?.error === "Cart is empty");
+    check("...code cart_empty", r.body?.code === "cart_empty");
 
     // Build a cart that MIXES two shops: 3 × Milk (₪10) from Shop A,
     // 2 × Bread (₪4) from Other Shop.
@@ -2449,6 +2450,7 @@ async function main() {
       body: { contactPhone: "0599123456" },
     });
     check("double-submit → 400 Cart is empty (no duplicate orders)", r.status === 400 && r.body?.error === "Cart is empty");
+    check("...code cart_empty (the app can send the customer to My orders)", r.body?.code === "cart_empty");
 
     // --- refusals: things that must block a checkout ---
     // Out of stock. Note this listing goes in shopB, not shopA: orderProductA
@@ -2466,6 +2468,7 @@ async function main() {
       body: { contactPhone: "0599" },
     });
     check("out-of-stock item → 409", r.status === 409 && r.body?.error === "Order Milk is out of stock");
+    check("...code out_of_stock", r.body?.code === "out_of_stock");
     await req("DELETE", "/api/cart", { token: orderCustomerToken });
 
     // A shop that has been hidden can't take orders.
@@ -2480,6 +2483,7 @@ async function main() {
       body: { contactPhone: "0599" },
     });
     check("inactive shop → 409", r.status === 409 && r.body?.error === "Hidden Shop is not accepting orders right now");
+    check("...code shop_closed", r.body?.code === "shop_closed");
     await req("DELETE", "/api/cart", { token: orderCustomerToken });
 
     // A listing deleted AFTER it went into the cart leaves a dangling line. We
@@ -2496,6 +2500,7 @@ async function main() {
       body: { contactPhone: "0599" },
     });
     check("deleted listing in cart → 409 (not a 500)", r.status === 409 && /no longer available/.test(r.body?.error || ""));
+    check("...code item_unavailable", r.body?.code === "item_unavailable");
     await req("DELETE", "/api/cart", { token: orderCustomerToken });
 
     // --- THE SECURITY TEST ---
@@ -3073,6 +3078,7 @@ async function main() {
       },
     });
     check("shop doesn't cover that area → 409 with both names", r.status === 409 && r.body?.error === "Shop A does not deliver to Rimal");
+    check("...code no_delivery_to_area", r.body?.code === "no_delivery_to_area");
 
     // The whole checkout was rejected, so the cart is untouched and retryable.
     r = await req("GET", "/api/cart", { token: orderCustomerToken });
@@ -4127,6 +4133,7 @@ async function main() {
       "checkout → 409, nothing ordered",
       r.status === 409 && r.body?.error === "Hide Me Soap is no longer available. Remove it and try again."
     );
+    check("...code item_unavailable (same fix as a deleted listing: remove the line)", r.body?.code === "item_unavailable");
 
     r = await req("GET", `/api/seller/listings?shop=${dashOpenShop._id}`, { token: dashToken });
     check("the seller still sees their item, marked hidden", r.body?.listings?.find((l) => l.product?._id === soapId)?.product?.isActive === false);
@@ -5192,6 +5199,44 @@ async function main() {
     check("offers back on → 200 (alerts still off)", r.body?.user?.notificationPrefs?.offers === true && r.body.user.notificationPrefs.alerts === false);
     r = await postMuteOffer("Tea deal 3");
     check("...the next offer reaches them again", r.body?.notified === 2 && (await countOf(mCustomer, "offer")) === 1);
+
+    // ============ Checkout: several requests at the same moment ============
+    // A double-tap on a phone sends checkouts that OVERLAP: each one reads the
+    // full cart before any of them has emptied it. Only one may create orders.
+    // This section has its own shop and customer, so the extra orders can't
+    // change any count checked earlier in this file.
+    console.log("\nCheckout: several requests at the same moment");
+
+    const raceSeller = await User.create({ name: "Race Seller", email: "raceseller@test.com", passwordHash: "x", role: "seller" });
+    const raceCustomer = await User.create({ name: "Race Customer", email: "racecustomer@test.com", passwordHash: "x", role: "customer" });
+    const raceCustomerToken = tokenFor(raceCustomer);
+    const raceShop = await Shop.create({ owner: raceSeller._id, name: "Race Shop", phone: "92" });
+    const raceProduct = await Product.create({ name: "Race Rice", nameAr: "أرز", category: category._id });
+    const raceListing = await Listing.create({ shop: raceShop._id, product: raceProduct._id, price: 12 });
+    await req("POST", "/api/cart/items", { token: raceCustomerToken, body: { listing: raceListing.id, quantity: 2 } });
+
+    const racers = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        req("POST", "/api/orders", { token: raceCustomerToken, body: { contactPhone: "0599" } })
+      )
+    );
+    const raceWins = racers.filter((x) => x.status === 201);
+    const raceLosses = racers.filter((x) => x.status !== 201);
+    check("5 checkouts at once → exactly one 201", raceWins.length === 1);
+    check(
+      "...the other 4 are refused: 409 cart_changed or 400 cart_empty",
+      raceLosses.length === 4 &&
+        raceLosses.every(
+          (x) => (x.status === 409 && x.body?.code === "cart_changed") || (x.status === 400 && x.body?.code === "cart_empty")
+        )
+    );
+    check("...only ONE order exists", (await Order.countDocuments({ customer: raceCustomer._id })) === 1);
+    check(
+      "...the seller is told once, not five times",
+      (await Notification.countDocuments({ recipient: raceSeller._id, event: "order_placed" })) === 1
+    );
+    r = await req("GET", "/api/cart", { token: raceCustomerToken });
+    check("...and the cart is empty", r.body?.cart?.items?.length === 0);
 
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body

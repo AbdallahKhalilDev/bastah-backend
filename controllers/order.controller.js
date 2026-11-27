@@ -74,15 +74,15 @@ const updateStatusSchema = z.object({
 // writing anything. Steps 1–6 are pure reads; the only writes are at the very
 // end. That ordering is what replaces a database transaction here (MongoDB
 // multi-document transactions need a replica set, and we run a standalone
-// mongod, so starting one would simply throw).
+// mongod locally, so starting one would simply throw).
 //
-// TODO(transactions): with a replica set, steps 7–8 below should be wrapped in
-// one transaction. Without it, two SIMULTANEOUS requests (e.g. two browser
-// tabs) can both read a non-empty cart before either clears it, and both will
-// create orders. We accept that: for a low-traffic app with human sellers who
-// can cancel a duplicate in one tap, a rare duplicate is better than the
-// alternative (clearing the cart FIRST, which loses it outright if the create
-// then fails).
+// Step 7 "claims" the cart before any order is written, so that several
+// checkouts arriving at the SAME moment (a double-tap on a phone) can't each
+// create a set of orders. See step 7 for how.
+//
+// Every refusal carries a `code` (cart_empty, out_of_stock, ...) besides its
+// English message, so the app can show its own Arabic text and offer the right
+// fix: remove a line, switch to pickup, or open "My orders".
 async function createOrder(req, res, next) {
   // 1. Validate the body against the whitelist FIRST. Bad shape → 400.
   const result = createOrderSchema.safeParse(req.body);
@@ -119,8 +119,11 @@ async function createOrder(req, res, next) {
   // 2. Load the caller's own cart, fully populated, via the CART's own helper.
   //    Resolved from the verified token — never from anything the client sends.
   const cart = await getPopulatedCart(req.user.id);
+  // This is also what a RETRY gets after a checkout that worked but whose reply
+  // never arrived: the orders exist and the cart is empty. The code lets the app
+  // send the customer to "My orders" instead of showing an error.
   if (!cart || cart.items.length === 0) {
-    return next({ status: 400, message: "Cart is empty" });
+    return next({ status: 400, code: "cart_empty", message: "Cart is empty" });
   }
 
   // 3. PRE-PASS over every cart line. Pure reads, zero writes — we are only
@@ -132,15 +135,18 @@ async function createOrder(req, res, next) {
     if (!item.listing || !item.listing.shop) {
       return next({
         status: 409,
+        code: "item_unavailable",
         message:
           "An item in your cart is no longer available. Remove it and try again.",
       });
     }
     // An admin hid the product since it went in the cart. Same treatment as a
     // deleted listing: refuse the whole checkout, never drop the line quietly.
+    // Same code too, because the fix is the same: remove that line.
     if (item.listing.product && item.listing.product.isActive === false) {
       return next({
         status: 409,
+        code: "item_unavailable",
         message: `${item.listing.product.name} is no longer available. Remove it and try again.`,
       });
     }
@@ -148,7 +154,7 @@ async function createOrder(req, res, next) {
       const name = item.listing.product
         ? item.listing.product.name
         : "An item in your cart";
-      return next({ status: 409, message: `${name} is out of stock` });
+      return next({ status: 409, code: "out_of_stock", message: `${name} is out of stock` });
     }
   }
 
@@ -188,6 +194,7 @@ async function createOrder(req, res, next) {
       const name = shop ? shop.name : "One of the shops in your cart";
       return next({
         status: 409,
+        code: "shop_closed",
         message: `${name} is not accepting orders right now`,
       });
     }
@@ -220,6 +227,7 @@ async function createOrder(req, res, next) {
       if (fee === null) {
         return next({
           status: 409,
+          code: "no_delivery_to_area",
           message: `${shop.name} does not deliver to ${area.name}`,
         });
       }
@@ -251,34 +259,69 @@ async function createOrder(req, res, next) {
   // rests on the seller turning up. The customer removes that shop's items (or
   // switches to pickup) and tries again.
 
-  // 7. WRITE. insertMany sends all N documents in a SINGLE round trip (Mongoose
+  // 7. CLAIM THE CART: empty it in ONE database operation, but only if it is
+  //    still exactly the cart we just checked.
+  //
+  //    Why empty it at all? The cart is a live SHORTLIST, not a commitment; once
+  //    it has become orders it has done its job. Leaving it full means the next
+  //    press of the button creates a SECOND identical set of orders, and a human
+  //    seller can't tell which one is real. Nothing is lost: the ORDER is the
+  //    receipt, and GET /api/orders shows it for good at the frozen price.
+  //
+  //    Why BEFORE writing the orders? Because of a double-tap. Two checkouts
+  //    arrive together, and both read the full cart in step 2 before either has
+  //    emptied it. If each one then simply wrote its orders, the customer would
+  //    get two sets. So each request must first win the cart.
+  //
+  //    How one request "wins": updateOne with a filter finds the cart AND
+  //    changes it in a single step, so no other request can slip in between.
+  //    The filter only matches while:
+  //      - updatedAt is still the value we read in step 2 (nobody changed the
+  //        cart since, not another checkout and not the customer adding an item;
+  //        every change to a cart moves its updatedAt), and
+  //      - "items.0" exists, i.e. the cart still has a first item.
+  //    The winner empties the cart (which also moves updatedAt). Every other
+  //    request then matches nothing: modifiedCount is 0, and it stops here
+  //    without writing anything.
+  //
+  //    A request that arrives a moment LATER, after the winner has finished,
+  //    reads an empty cart in step 2 and gets "Cart is empty" instead. Both
+  //    answers mean the same thing to the app: look in "My orders".
+  const claimedItems = cart.items.map((item) => ({
+    listing: item.listing._id,
+    quantity: item.quantity,
+  }));
+  const claim = await Cart.updateOne(
+    { _id: cart._id, updatedAt: cart.updatedAt, "items.0": { $exists: true } },
+    { $set: { items: [] } }
+  );
+  if (claim.modifiedCount === 0) {
+    return next({
+      status: 409,
+      code: "cart_changed",
+      message: "Your cart changed during checkout. Check My orders, then try again.",
+    });
+  }
+
+  // 8. WRITE. insertMany sends all N documents in a SINGLE round trip (Mongoose
   //    still runs each document's schema validators). Because steps 3–6 already
   //    ruled out every BUSINESS reason a document could be rejected, by the time
   //    we reach here the only thing that can realistically fail is the server.
-  const created = await Order.insertMany(docs);
-
-  // 8. EMPTY THE CART — LAST, only once the orders actually exist.
   //
-  //    Why empty it at all? The cart is documented as a live SHORTLIST, not a
-  //    commitment; once it has become orders it has done its job. Leaving it
-  //    full means the next press of the button silently creates a SECOND
-  //    identical set of orders — and a human seller reading these as real
-  //    requests cannot tell which one is real. Nothing is lost either: the
-  //    ORDER is the receipt, and GET /api/orders shows it permanently at the
-  //    frozen price.
-  //
-  //    A happy side effect: the cart is now its own idempotency token. A
-  //    double-submit finds an empty cart and gets "Cart is empty" — no
-  //    duplicates, with no extra field, request id, or dedupe table.
-  //
-  //    Doing it LAST matters. If this clear somehow fails, the customer has
-  //    their orders AND a stale cart — annoying, and fixable with
-  //    DELETE /api/cart. The reverse order could destroy a cart with no orders
-  //    to show for it.
-  const fresh = await Cart.findOne({ customer: req.user.id });
-  if (fresh) {
-    fresh.items = [];
-    await fresh.save();
+  //    If it does fail, the cart is already empty and no orders exist, so we PUT
+  //    THE CART BACK before passing the error on (the same "undo it by hand"
+  //    idea createAccount uses, since we have no transactions). We only restore
+  //    it while it's still empty, so we never overwrite items the customer added
+  //    in the meantime.
+  let created;
+  try {
+    created = await Order.insertMany(docs);
+  } catch (err) {
+    await Cart.updateOne(
+      { _id: cart._id, "items.0": { $exists: false } },
+      { $set: { items: claimedItems } }
+    );
+    throw err;
   }
 
   // 8b. Tell each shop's owner they have a new order. This comes AFTER the
