@@ -53,7 +53,12 @@ async function searchProducts({ q, limit, skip = 0 }) {
   const filter = { ...VISIBLE_PRODUCT, $or: [{ name: rx }, { nameAr: rx }] };
   const [items, total] = await Promise.all([
     Product.find(filter)
-      .sort({ name: 1 })
+      // `_id` is the TIE-BREAKER. Two products can share a name, and MongoDB
+      // returns tied items in no fixed order, so each page could be cut from a
+      // different order: some items would appear twice and others never. `_id`
+      // is unique, so with it last there are no ties and the order is the same
+      // every time. Every paged list in Bastah ends its sort with `_id`.
+      .sort({ name: 1, _id: 1 })
       .skip(skip)
       .limit(limit)
       .populate("category", "name nameAr"),
@@ -79,7 +84,9 @@ async function searchShops({ q, limit, skip = 0 }) {
   };
   const [items, total] = await Promise.all([
     Shop.find(filter)
-      .sort({ ratingAvg: -1, ratingCount: -1 })
+      // `_id` last as the tie-breaker (see searchProducts): every new shop starts
+      // at rating 0 with 0 reviews, so ties here are the normal case.
+      .sort({ ratingAvg: -1, ratingCount: -1, _id: 1 })
       .skip(skip)
       .limit(limit)
       .select(PUBLIC_SHOP_FIELDS)
@@ -97,7 +104,7 @@ async function searchCategories({ q, limit, skip = 0 }) {
 
   const filter = { isActive: true, $or: [{ name: rx }, { nameAr: rx }] };
   const [items, total] = await Promise.all([
-    Category.find(filter).sort({ name: 1 }).skip(skip).limit(limit),
+    Category.find(filter).sort({ name: 1, _id: 1 }).skip(skip).limit(limit),
     Category.countDocuments(filter),
   ]);
   return { items, total };

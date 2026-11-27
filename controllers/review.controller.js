@@ -162,8 +162,10 @@ async function listShopReviews(req, res, next) {
   //    `limit`. CRITICAL for privacy: populate the author with ONLY their name —
   //    the second argument is a whitelist, so email/passwordHash can never leak
   //    on this public endpoint. A shop with no reviews simply gives back [] (200).
+  // `_id` breaks ties between reviews written in the same millisecond, so pages
+  // never repeat or skip one (see utils/searchQueries.js).
   const reviews = await Review.find({ shop: req.params.shopId })
-    .sort({ createdAt: -1 })
+    .sort({ createdAt: -1, _id: -1 })
     .skip(skip)
     .limit(limit)
     .populate("author", "name");

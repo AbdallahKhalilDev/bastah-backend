@@ -43,7 +43,8 @@ function clampLimit(query, def) {
 // to name/nameAr only — the same public projection every other product read uses.
 function getNewArrivals({ limit, skip = 0 }) {
   return Product.find(VISIBLE_PRODUCT)
-    .sort({ createdAt: -1 })
+    // `_id` breaks ties (same millisecond), so pages never repeat or skip one.
+    .sort({ createdAt: -1, _id: -1 })
     .skip(skip)
     .limit(limit)
     .populate("category", "name nameAr");
@@ -62,7 +63,7 @@ async function getFeaturedProducts({ limit }) {
   // A hidden product stays flagged as featured (so un-hiding brings it back),
   // but VISIBLE_PRODUCT keeps it off the page while it's hidden.
   const featured = await Product.find({ isFeatured: true, ...VISIBLE_PRODUCT })
-    .sort({ createdAt: -1 })
+    .sort({ createdAt: -1, _id: -1 })
     .limit(limit)
     .populate("category", "name nameAr");
 
@@ -85,7 +86,9 @@ async function getFeaturedProducts({ limit }) {
 // above so no owner/email is ever returned.
 function getTopStores({ limit }) {
   return Shop.find({ isActive: true })
-    .sort({ ratingAvg: -1, ratingCount: -1 })
+    // `_id` last: new shops all tie at 0, and without it WHICH of them make the
+    // list could change from one request to the next.
+    .sort({ ratingAvg: -1, ratingCount: -1, _id: 1 })
     .limit(limit)
     .select(PUBLIC_SHOP_FIELDS)
     .populate("category", "name nameAr");

@@ -5274,6 +5274,66 @@ async function main() {
       (await Notification.countDocuments({ "link.order": statusRaceOrder._id })) === 1
     );
 
+    // ============ Paging when items tie on the sort order ============
+    // Sorted by rating alone, every new shop ties at 0. MongoDB returns tied
+    // items in no fixed order, so each page could be cut from a DIFFERENT order:
+    // some items show up twice and others never. Reading every page must give
+    // back every item exactly once. (Raw inserts let us set the SAME createdAt
+    // on all of them, which Mongoose's timestamps wouldn't allow.)
+    console.log("\nPaging: items that tie on the sort order");
+
+    // Reads pages 1..pages of a list and returns every item id, in page order.
+    async function idsFromPages(pathFor, pick, pages) {
+      const ids = [];
+      for (let page = 1; page <= pages; page++) {
+        const res = await req("GET", pathFor(page));
+        ids.push(...(pick(res.body) || []).map((x) => String(x._id)));
+      }
+      return ids;
+    }
+    const allOnce = (ids) => ids.length === 30 && new Set(ids).size === 30;
+    const sameMoment = new Date();
+
+    await Shop.collection.insertMany(
+      Array.from({ length: 30 }, (_, i) => ({
+        owner: new mongoose.Types.ObjectId(),
+        name: `Tie Shop ${String(i + 1).padStart(2, "0")}`,
+        phone: "93",
+        isActive: true,
+        ratingAvg: 0,
+        ratingCount: 0,
+        deliveryZones: [],
+        createdAt: sameMoment,
+        updatedAt: sameMoment,
+      }))
+    );
+    let pagedIds = await idsFromPages((p) => `/api/search?type=shops&q=Tie%20Shop&limit=5&page=${p}`, (b) => b?.results, 6);
+    check("30 shops with the same rating, 6 pages of 5 → all 30, each once", allOnce(pagedIds));
+
+    await Product.collection.insertMany(
+      Array.from({ length: 30 }, (_, i) => ({
+        name: `Tie Product ${String(i + 1).padStart(2, "0")}`,
+        nameAr: "منتج",
+        category: category._id,
+        createdAt: sameMoment,
+        updatedAt: sameMoment,
+      }))
+    );
+    pagedIds = await idsFromPages((p) => `/api/products/search?q=Tie%20Product&limit=5&page=${p}`, (b) => b?.products, 6);
+    check("30 products made at the same moment, newest-first pages → all 30, each once", allOnce(pagedIds));
+
+    await Product.collection.insertMany(
+      Array.from({ length: 30 }, () => ({
+        name: "Twin Kettle",
+        nameAr: "غلاية",
+        category: category._id,
+        createdAt: sameMoment,
+        updatedAt: sameMoment,
+      }))
+    );
+    pagedIds = await idsFromPages((p) => `/api/search?type=products&q=Twin%20Kettle&limit=5&page=${p}`, (b) => b?.results, 6);
+    check("30 products with the same name, A→Z pages → all 30, each once", allOnce(pagedIds));
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

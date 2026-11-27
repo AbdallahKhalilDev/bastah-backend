@@ -83,8 +83,10 @@ async function listProducts(req, res, next) {
 
   // The actual page: sort newest-first, jump over `skip` docs, take `limit`.
   // populate swaps each category id for just its name/nameAr (nothing else).
+  // `_id` breaks ties between products created in the same millisecond, so no
+  // product is shown twice or skipped across pages (see utils/searchQueries.js).
   const products = await Product.find(VISIBLE_PRODUCT)
-    .sort({ createdAt: -1 })
+    .sort({ createdAt: -1, _id: -1 })
     .skip(skip)
     .limit(limit)
     .populate("category", "name nameAr");
@@ -148,7 +150,9 @@ async function searchProducts(req, res, next) {
   // sort — a small whitelist. "name" sorts A→Z; anything else (including
   // "newest", an unknown value, or nothing) falls back to newest-first. An
   // unexpected value never errors, it just uses the default.
-  const sort = req.query.sort === "name" ? { name: 1 } : { createdAt: -1 };
+  // Both end with `_id` as the tie-breaker, so pages never repeat or skip a
+  // product that shares a name or a creation time (see utils/searchQueries.js).
+  const sort = req.query.sort === "name" ? { name: 1, _id: 1 } : { createdAt: -1, _id: -1 };
 
   // Same paginated shape as the browse list.
   const total = await Product.countDocuments(filter);
