@@ -12,7 +12,7 @@ const Product = require("../models/Product");
 const Listing = require("../models/Listing");
 const parsePagination = require("../utils/pagination");
 const parseBooleanQuery = require("../utils/booleanQuery");
-const escapeRegex = require("../utils/escapeRegex");
+const searchPattern = require("../utils/searchPattern");
 const { VISIBLE_PRODUCT } = require("../utils/productRules");
 const { notifyProductVisibilityChanged } = require("../utils/accountNotifications");
 
@@ -76,9 +76,9 @@ async function listAllProducts(req, res, next) {
     filter.createdBy = req.query.createdBy;
   }
 
-  const q = String(req.query.q || "").trim();
-  if (q) {
-    const pattern = new RegExp(escapeRegex(q), "i");
+  // Same search rule as everywhere (utils/searchPattern.js). null = no search.
+  const pattern = searchPattern(String(req.query.q || ""));
+  if (pattern) {
     filter.$or = [{ name: pattern }, { nameAr: pattern }];
   }
 

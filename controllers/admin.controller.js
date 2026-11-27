@@ -4,7 +4,7 @@ const { z } = require("zod");
 const User = require("../models/User");
 const Shop = require("../models/Shop");
 const parsePagination = require("../utils/pagination");
-const escapeRegex = require("../utils/escapeRegex");
+const searchPattern = require("../utils/searchPattern");
 const { signupShopSchema, createShopFor } = require("../utils/shopRules");
 const { lockSellerShops, unlockSellerShops } = require("../utils/shopLocks");
 const {
@@ -115,12 +115,11 @@ async function listUsers(req, res, next) {
       req.query.status === "active" ? { $in: ["active", null] } : req.query.status;
   }
 
-  // Search: "contains", ignoring capitals. escapeRegex makes characters like
-  // "(" or "+" match literally instead of breaking the search (the same helper
-  // the product and global search use).
-  const q = String(req.query.q || "").trim();
-  if (q) {
-    const pattern = new RegExp(escapeRegex(q), "i");
+  // Search: "contains", ignoring capitals and Arabic spelling variants, with
+  // characters like "(" or "+" matched literally (the same searchPattern the
+  // product and global search use). null = nothing to search for.
+  const pattern = searchPattern(String(req.query.q || ""));
+  if (pattern) {
     filter.$or = [{ name: pattern }, { email: pattern }, { phone: pattern }];
   }
 

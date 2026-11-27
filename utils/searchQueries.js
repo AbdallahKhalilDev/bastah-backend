@@ -12,8 +12,9 @@
 // full page (skip/limit). `total` is the grand count of matches, which the
 // dropdown uses to show "See all 42 products".
 //
-// Matching is REGEX-based (case-insensitive partial match), exactly like the
-// existing product search. We deliberately keep that over a MongoDB text index:
+// Matching is REGEX-based (a "contains" match that ignores capitals and Arabic
+// spelling variants, built by utils/searchPattern.js), exactly like the product
+// search. We deliberately keep that over a MongoDB text index:
 // regex matches substrings as the user types, while a text index only matches
 // whole words. A text index is a future scaling optimization, not part of this.
 //
@@ -23,7 +24,7 @@ const Product = require("../models/Product");
 const Shop = require("../models/Shop");
 const Category = require("../models/Category");
 const { VISIBLE_PRODUCT } = require("./productRules");
-const escapeRegex = require("./escapeRegex");
+const searchPattern = require("./searchPattern");
 // Reuse the SAME safe public shop projection the Home page uses — one source of
 // truth for "which shop fields are safe to expose" (notably: never `owner`, so
 // the owner's email/passwordHash can't leak through search results).
@@ -33,19 +34,12 @@ const { PUBLIC_SHOP_FIELDS } = require("./homeQueries");
 // dropdown shows a taste of each type, with a "See all N" link for the rest.
 const DROPDOWN_LIMIT = 5;
 
-// Turn a raw query string into a case-insensitive partial-match regex, or null
-// when the query is empty/whitespace (nothing to search for yet).
-function toRegex(q) {
-  const trimmed = typeof q === "string" ? q.trim() : "";
-  return trimmed ? new RegExp(escapeRegex(trimmed), "i") : null;
-}
-
 // Products — bilingual: match the English name OR the Arabic nameAr, the same
 // fields the existing /api/products/search matches. Sorted A→Z for a predictable
 // type-ahead. Category populated down to name/nameAr only, like every other
 // product read.
 async function searchProducts({ q, limit, skip = 0 }) {
-  const rx = toRegex(q);
+  const rx = searchPattern(q); // null = nothing to search for yet
   if (!rx) return { items: [], total: 0 };
 
   // Not hidden (VISIBLE_PRODUCT) AND the name matches: every key of a filter
@@ -75,7 +69,7 @@ async function searchProducts({ q, limit, skip = 0 }) {
 // Note: `description` is matched by the DB filter but isn't in the public
 // projection, so we can FIND a shop by its description without exposing it.
 async function searchShops({ q, limit, skip = 0 }) {
-  const rx = toRegex(q);
+  const rx = searchPattern(q); // null = nothing to search for yet
   if (!rx) return { items: [], total: 0 };
 
   const filter = {
@@ -99,7 +93,7 @@ async function searchShops({ q, limit, skip = 0 }) {
 // Categories — bilingual name/nameAr, active only (a hidden category never
 // appears), sorted A→Z for a predictable dropdown.
 async function searchCategories({ q, limit, skip = 0 }) {
-  const rx = toRegex(q);
+  const rx = searchPattern(q); // null = nothing to search for yet
   if (!rx) return { items: [], total: 0 };
 
   const filter = { isActive: true, $or: [{ name: rx }, { nameAr: rx }] };

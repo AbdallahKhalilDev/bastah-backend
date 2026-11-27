@@ -13,7 +13,7 @@ const { z } = require("zod");
 const Shop = require("../models/Shop");
 const parsePagination = require("../utils/pagination");
 const parseBooleanQuery = require("../utils/booleanQuery");
-const escapeRegex = require("../utils/escapeRegex");
+const searchPattern = require("../utils/searchPattern");
 const { ZONE_POPULATE } = require("../utils/shopRules");
 const { lockShop, unlockShop } = require("../utils/shopLocks");
 const {
@@ -86,11 +86,10 @@ async function listAllShops(req, res, next) {
     filter.owner = req.query.owner;
   }
 
-  // "Contains", ignoring capitals, with "(" or "+" matched literally (the same
-  // escapeRegex as every other search).
-  const q = String(req.query.q || "").trim();
-  if (q) {
-    const pattern = new RegExp(escapeRegex(q), "i");
+  // "Contains", ignoring capitals and Arabic spelling variants, with "(" or "+"
+  // matched literally (the same searchPattern as every other search).
+  const pattern = searchPattern(String(req.query.q || ""));
+  if (pattern) {
     filter.$or = [{ name: pattern }, { area: pattern }];
   }
 

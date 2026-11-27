@@ -3,7 +3,7 @@ const { z } = require("zod");
 const Product = require("../models/Product");
 const parsePagination = require("../utils/pagination");
 const homeQueries = require("../utils/homeQueries");
-const escapeRegex = require("../utils/escapeRegex");
+const searchPattern = require("../utils/searchPattern");
 const { checkCategory } = require("../utils/shopRules");
 
 // --- Input validation ---------------------------------------------------
@@ -128,13 +128,13 @@ async function searchProducts(req, res, next) {
   const filter = { ...VISIBLE_PRODUCT };
 
   // q — case-insensitive PARTIAL text match on name OR nameAr. We use a regex:
-  // new RegExp("sug", "i") matches "Sugar", "sugar cane", etc. ($or = "either
-  // field can match"). Approach note: a regex is the simple way to match a
-  // substring as the user types; a MongoDB text index would scale better on a
-  // huge catalog but only matches whole words, so regex fits this MVP.
-  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  if (q) {
-    const rx = new RegExp(escapeRegex(q), "i");
+  // "sug" matches "Sugar", "sugar cane", etc., and "اطفال" matches "أطفال"
+  // (searchPattern handles the Arabic spelling variants). ($or = "either field
+  // can match".) Approach note: a regex is the simple way to match a substring
+  // as the user types; a MongoDB text index would scale better on a huge
+  // catalog but only matches whole words, so regex fits this MVP.
+  const rx = searchPattern(req.query.q);
+  if (rx) {
     filter.$or = [{ name: rx }, { nameAr: rx }];
   }
 

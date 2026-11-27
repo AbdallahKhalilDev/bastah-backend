@@ -5334,6 +5334,48 @@ async function main() {
     pagedIds = await idsFromPages((p) => `/api/search?type=products&q=Twin%20Kettle&limit=5&page=${p}`, (b) => b?.results, 6);
     check("30 products with the same name, A→Z pages → all 30, each once", allOnce(pagedIds));
 
+    // ============ Arabic search: spelling variants ============
+    // People rarely type the hamza, often write ه for ة and ي for ى, and
+    // sometimes add vowel marks. A search must find the product either way, in
+    // BOTH directions: what's typed may have the mark and the name not, or the
+    // other way round.
+    console.log("\nArabic search: spelling variants");
+
+    await Product.create({ name: "Variant Bag", nameAr: "حقيبة أطفال", category: category._id });
+    await Product.create({ name: "Variant Honey", nameAr: "عسلٌ جبليٌّ", category: category._id }); // stored WITH vowel marks
+    await Product.create({ name: "Variant Tools", nameAr: "ادوات الرسم", category: category._id }); // stored WITHOUT the hamza
+    await Product.create({ name: "Variant Sweets", nameAr: "حلوى العيد", category: category._id });
+    await Shop.create({ owner: raceSeller._id, name: "سوق الأمل", phone: "94" });
+
+    const productSearch = (q) => req("GET", `/api/products/search?q=${encodeURIComponent(q)}`);
+    const foundOnly = (res, name) => res.body?.total === 1 && res.body.products?.[0]?.name === name;
+
+    r = await productSearch("حقيبة أطفال");
+    check("the exact spelling still works", foundOnly(r, "Variant Bag"));
+    r = await productSearch("اطفال");
+    check("no hamza (اطفال) finds أطفال", foundOnly(r, "Variant Bag"));
+    r = await productSearch("حقيبه");
+    check("ه for ة (حقيبه) finds حقيبة", foundOnly(r, "Variant Bag"));
+    r = await productSearch("حَقِيبَة");
+    check("vowel marks typed in the search are ignored", foundOnly(r, "Variant Bag"));
+    r = await productSearch("حقيبة  أطفال");
+    check("a double space still matches one space", foundOnly(r, "Variant Bag"));
+    r = await productSearch("عسل جبلي");
+    check("vowel marks stored in the name are skipped (عسلٌ جبليٌّ)", foundOnly(r, "Variant Honey"));
+    r = await productSearch("أدوات");
+    check("a hamza in the search finds a name stored without one", foundOnly(r, "Variant Tools"));
+    r = await productSearch("حلوي");
+    check("ي for ى (حلوي) finds حلوى", foundOnly(r, "Variant Sweets"));
+    r = await productSearch("حقيبة اطفال مدرسية");
+    check("...but it's still a 'contains' search: an extra word → nothing", r.body?.total === 0);
+
+    r = await req("GET", `/api/search?q=${encodeURIComponent("الامل")}`);
+    check("global search: الامل finds the shop سوق الأمل", r.body?.counts?.shops === 1 && r.body.shops?.[0]?.name === "سوق الأمل");
+    r = await req("GET", `/api/search?q=${encodeURIComponent("اطفال")}`);
+    check("global search: اطفال finds the product too", r.body?.counts?.products === 1);
+    r = await req("GET", `/api/admin/products?q=${encodeURIComponent("اطفال")}`, { token: adminToken });
+    check("admin search follows the same rule", r.body?.products?.length === 1 && r.body.products[0]?.name === "Variant Bag");
+
     // ===== Static product images (served by express.static, not a controller) =====
     // We call fetch directly instead of req(), because req() expects a JSON body
     // and an image is binary.

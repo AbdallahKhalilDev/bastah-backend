@@ -6,7 +6,7 @@
 const mongoose = require("mongoose");
 const Review = require("../models/Review");
 const parsePagination = require("../utils/pagination");
-const escapeRegex = require("../utils/escapeRegex");
+const searchPattern = require("../utils/searchPattern");
 const { getOrderStats, getListingStats, getSiteCounts } = require("../utils/statsQueries");
 
 // GET /api/admin/stats
@@ -57,9 +57,10 @@ async function listAllReviews(req, res, next) {
     filter.rating = rating;
   }
 
-  const q = String(req.query.q || "").trim();
-  if (q) {
-    filter.comment = new RegExp(escapeRegex(q), "i");
+  // Same search rule as everywhere (utils/searchPattern.js). null = no search.
+  const pattern = searchPattern(String(req.query.q || ""));
+  if (pattern) {
+    filter.comment = pattern;
   }
 
   const [reviews, total] = await Promise.all([
