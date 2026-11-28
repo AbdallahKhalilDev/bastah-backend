@@ -61,13 +61,58 @@ function getPopulatedCart(customerId) {
   });
 }
 
+// --- Lines whose listing was deleted ------------------------------------
+// A seller can delete a listing (DELETE /api/listings/:id) while it sits in
+// someone's cart. The cart line still stores that listing's id, but the populate
+// above finds nothing, so the line comes back as `listing: null`, and its id is
+// no longer in the reply. The app would then have no way to remove just that line.
+//
+// getCartForReply fixes that quietly. It reads the cart as usual and, ONLY if a
+// line points at nothing, removes those dead lines from the database and reads
+// the cart again. So no cart reply ever contains `listing: null`, and the cart
+// tidies itself the first time the customer looks at it. Every cart endpoint
+// below replies through it.
+//
+// Checkout (order.controller.js) deliberately keeps using getPopulatedCart: it
+// still SEES a dead line and refuses with 409 item_unavailable, instead of
+// quietly ordering less than the customer saw on screen. The app reacts by
+// reloading the cart, and by then this helper has removed the line.
+async function getCartForReply(customerId) {
+  const cart = await getPopulatedCart(customerId);
+  if (!cart || cart.items.every((item) => item.listing)) {
+    return cart; // the normal case: nothing to tidy
+  }
+
+  await removeDeletedListings(cart._id);
+  return getPopulatedCart(customerId);
+}
+
+// Removes every line of ONE cart whose listing no longer exists. The populated
+// cart can't tell us which ids those were (its dead lines have lost them), so we
+// read the stored ids directly, ask which of those listings still exist, and
+// $pull ("take out of the array") the rest. We pull by the DEAD ids rather than
+// "keep only these": a line another request adds at the very same moment can
+// then never be removed by mistake.
+async function removeDeletedListings(cartId) {
+  const stored = await Cart.findById(cartId).select("items.listing").lean();
+  if (!stored) return;
+
+  const ids = stored.items.map((item) => item.listing);
+  const stillThere = await Listing.distinct("_id", { _id: { $in: ids } });
+  const alive = new Set(stillThere.map((id) => id.toString()));
+  const dead = ids.filter((id) => !alive.has(id.toString()));
+  if (dead.length === 0) return;
+
+  await Cart.updateOne({ _id: cartId }, { $pull: { items: { listing: { $in: dead } } } });
+}
+
 // GET /api/cart
 // Protected: a logged-in CUSTOMER only (auth + requireRole("customer") run first,
 // in the route). Returns THIS caller's cart — always resolved from the verified
 // token (req.user.id), never from anything the client sends.
 async function getCart(req, res, next) {
   // Load the caller's own cart, fully populated.
-  const cart = await getPopulatedCart(req.user.id);
+  const cart = await getCartForReply(req.user.id);
 
   // A brand-new customer simply hasn't got a cart document yet. That's NOT an
   // error — an empty cart is a perfectly valid answer — so we return a 200 with
@@ -136,7 +181,7 @@ async function addItem(req, res, next) {
 
   // 5. Return the SAME populated shape as GET, via the shared helper — so the
   //    client gets the updated cart with every item's live price/product/shop.
-  const populated = await getPopulatedCart(req.user.id);
+  const populated = await getCartForReply(req.user.id);
   res.status(201).json({ cart: populated });
 }
 
@@ -183,7 +228,7 @@ async function setItemQuantity(req, res, next) {
   await cart.save();
 
   // 5. Return the same populated shape as GET.
-  const populated = await getPopulatedCart(req.user.id);
+  const populated = await getCartForReply(req.user.id);
   res.json({ cart: populated });
 }
 
@@ -213,7 +258,7 @@ async function removeItem(req, res, next) {
   await cart.save();
 
   // 4. Return the updated, populated cart.
-  const populated = await getPopulatedCart(req.user.id);
+  const populated = await getCartForReply(req.user.id);
   res.json({ cart: populated });
 }
 
@@ -232,7 +277,7 @@ async function clearCart(req, res, next) {
   cart.items = [];
   await cart.save();
 
-  const populated = await getPopulatedCart(req.user.id);
+  const populated = await getCartForReply(req.user.id);
   res.json({ cart: populated });
 }
 

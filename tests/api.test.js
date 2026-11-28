@@ -2002,6 +2002,50 @@ async function main() {
     r = await req("GET", "/api/cart", { token: customer2Token });
     check("customer2's cart is unaffected by customer1 clearing", r.body?.cart?.items?.length === 1 && findItem(r.body, "Cart Bread")?.quantity === 7);
 
+    // ============ Cart: a line whose listing was deleted ============
+    console.log("\nCart: a line whose listing was deleted");
+    // A seller may delete a listing that is already in someone's cart. That line
+    // then points at nothing. It used to come back as `listing: null`, WITHOUT its
+    // id, so the app had no way to remove just that line. Now every cart reply
+    // drops such lines, and removes them from the database for good.
+    const goneCustomer = await User.create({
+      name: "Gone Line Customer",
+      email: "goneline@test.com",
+      passwordHash: "x",
+      role: "customer",
+    });
+    const goneToken = tokenFor(goneCustomer);
+    const goneProduct = await Product.create({
+      name: "Cart Gone Item",
+      nameAr: "منتج محذوف",
+      category: category._id,
+    });
+    const goneListing = await Listing.create({ shop: shopA._id, product: goneProduct._id, price: 3 });
+    await Cart.create({
+      customer: goneCustomer._id,
+      items: [
+        { listing: goneListing._id, quantity: 1 },
+        { listing: cartListingA._id, quantity: 2 },
+      ],
+    });
+    await Listing.deleteOne({ _id: goneListing._id });
+
+    r = await req("GET", "/api/cart", { token: goneToken });
+    check("GET → 200", r.status === 200);
+    check("no line with listing: null in the reply", r.body?.cart?.items?.every((i) => i.listing !== null));
+    check("the live line is still there, untouched (Cart Milk x2)", r.body?.cart?.items?.length === 1 && findItem(r.body, "Cart Milk")?.quantity === 2);
+    let goneCart = await Cart.findOne({ customer: goneCustomer._id });
+    check("the dead line is removed from the database too", goneCart?.items?.length === 1 && goneCart.items[0].listing.toString() === cartListingA.id);
+
+    // The write endpoints reply with the same clean cart.
+    const goneListing2 = await Listing.create({ shop: shopA._id, product: goneProduct._id, price: 3 });
+    await Cart.updateOne({ customer: goneCustomer._id }, { $push: { items: { listing: goneListing2._id, quantity: 1 } } });
+    await Listing.deleteOne({ _id: goneListing2._id });
+    r = await req("POST", "/api/cart/items", { token: goneToken, body: { listing: cartListingB.id } });
+    check("POST → 201 with no null line (Cart Milk + Cart Bread)", r.status === 201 && r.body?.cart?.items?.length === 2 && r.body.cart.items.every((i) => i.listing !== null));
+    goneCart = await Cart.findOne({ customer: goneCustomer._id });
+    check("...and the database holds just those 2 lines", goneCart?.items?.length === 2);
+
     // ========= Home (Step 10, Slice 1): featured + new arrivals =========
     console.log("\nGET /api/products/featured + /new, PATCH /:id/feature");
 
@@ -2501,6 +2545,9 @@ async function main() {
     });
     check("deleted listing in cart → 409 (not a 500)", r.status === 409 && /no longer available/.test(r.body?.error || ""));
     check("...code item_unavailable", r.body?.code === "item_unavailable");
+    // What the app does next: reload the cart. The dead line is gone by itself.
+    r = await req("GET", "/api/cart", { token: orderCustomerToken });
+    check("...reloading the cart drops the dead line by itself", r.status === 200 && r.body?.cart?.items?.length === 0);
     await req("DELETE", "/api/cart", { token: orderCustomerToken });
 
     // --- THE SECURITY TEST ---
